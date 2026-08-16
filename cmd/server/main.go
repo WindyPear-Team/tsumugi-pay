@@ -15,10 +15,16 @@ import (
 
 	"github.com/WindyPear-Team/tsumugi-pay/internal/app"
 	"github.com/WindyPear-Team/tsumugi-pay/web"
+	"github.com/joho/godotenv"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Local development commonly keeps credentials in .env. Load it without
+	// replacing values explicitly supplied by the shell or deployment runtime.
+	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		logger.Warn("could not load .env", "error", err)
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		logger.Error("invalid configuration", "error", err)
