@@ -10,22 +10,28 @@ Tsumugi Pay 是一个面向 SaaS 场景的**多租户支付运营系统**。项�
 | --- | --- |
 | `cmd/`、`internal/` | 根目录 Go HTTP 服务、支付适配器与 OPS 兼容端点。 |
 | `web/` | 使用指定 shadcn 初始化命令生成的 React、Vite 管理后台；其 `dist/` 会被 Go `embed` 到二进制文件。 |
-| `migrations/001_init.sql` | PostgreSQL 多租户、账单、通道、退款、回调事件与审计日志表。 |
+| `migrations/001_init.sql` | PostgreSQL 原生迁移参考；服务启动时会自动应用跨库基础架构。 |
 
 ## 本地启动
 
-首先准备 PostgreSQL 16 或兼容版本，创建数据库并应用迁移。以下示例使用开发配置；生产环境必须替换 JWT 密钥与 32 字节加密密钥。
+服务支持 PostgreSQL、MySQL 8+ 与 SQLite。启动时会自动创建缺失的表和索引，因而不需要手动执行迁移；已有 PostgreSQL 部署仍可继续使用原迁移。以下示例使用开发配置；生产环境必须替换 JWT 密钥与 32 字节加密密钥。
 
 ```powershell
-# 1. 创建数据库后，执行迁移（根据本机 PostgreSQL 工具路径调整）
-psql $env:DATABASE_URL -f .\migrations\001_init.sql
-
-# 2. 设置服务配置
+# 1. 设置服务配置（PostgreSQL）
+$env:DATABASE_DRIVER = "postgres"
 $env:DATABASE_URL = "postgres://tsumugi:tsumugi@localhost:5432/tsumugi_pay?sslmode=disable"
 $env:PUBLIC_BASE_URL = "http://localhost:8080"
 $env:JWT_SECRET = "replace-with-a-long-random-secret"
 
-# 3. 构建前端，并将 web/dist 嵌入 Go 二进制同源托管
+# MySQL 示例：
+# $env:DATABASE_DRIVER = "mysql"
+# $env:DATABASE_URL = "tsumugi:tsumugi@tcp(127.0.0.1:3306)/tsumugi_pay?parseTime=true&charset=utf8mb4"
+
+# SQLite 示例（适合本地开发和单机部署）：
+# $env:DATABASE_DRIVER = "sqlite"
+# $env:DATABASE_URL = "./data/tsumugi-pay.db"
+
+# 2. 构建前端，并将 web/dist 嵌入 Go 二进制同源托管
 Set-Location .\web
 yarn build
 Set-Location ..
@@ -42,7 +48,8 @@ yarn dev
 
 | 配置项 | 开发默认值 | 生产要求 |
 | --- | --- | --- |
-| `DATABASE_URL` | `postgres://tsumugi:tsumugi@localhost:5432/tsumugi_pay?sslmode=disable` | 使用受保护的 TLS 数据库连接。 |
+| `DATABASE_DRIVER` | `postgres` | `postgres`、`mysql` 或 `sqlite`。 |
+| `DATABASE_URL` | PostgreSQL 开发连接串 | 传入对应驱动的 DSN；MySQL 使用 `parseTime=true`。 |
 | `PUBLIC_BASE_URL` | `http://localhost:8080` | 支付回调可访问的 HTTPS 域名。 |
 | `JWT_SECRET` | 仅用于开发的占位值 | 强随机、私密并定期轮换。 |
 | `APP_ENCRYPTION_KEY` | 由开发 JWT 密钥派生 | 必填；Base64 编码的 32 字节密钥。 |

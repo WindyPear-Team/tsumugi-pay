@@ -13,10 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/veloce-ailab/tsumugi-pay/internal/app"
-	"github.com/veloce-ailab/tsumugi-pay/web"
+	"github.com/WindyPear-Team/tsumugi-pay/internal/app"
+	"github.com/WindyPear-Team/tsumugi-pay/web"
 )
 
 func main() {
@@ -30,25 +28,27 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
-	if err != nil {
-		logger.Error("invalid database url", "error", err)
-		os.Exit(1)
-	}
-	poolCfg.MaxConns = 12
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	database, err := app.OpenDatabase(cfg.DatabaseDriver, cfg.DatabaseURL)
 	if err != nil {
 		logger.Error("database connection failed", "error", err)
 		os.Exit(1)
 	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
+	store := app.NewStore(database)
+	if err := store.ConfigurePool(12); err != nil {
+		logger.Error("database pool configuration failed", "error", err)
+		os.Exit(1)
+	}
+	if err := store.Ping(ctx); err != nil {
 		logger.Error("database ping failed", "error", err)
+		os.Exit(1)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		logger.Error("database migration failed", "error", err)
 		os.Exit(1)
 	}
 
 	service, err := app.New(app.Config{
-		Database:      pool,
+		Database:      store,
 		JWTSecret:     cfg.JWTSecret,
 		EncryptionKey: cfg.EncryptionKey,
 		PublicBaseURL: cfg.PublicBaseURL,
@@ -90,23 +90,25 @@ func main() {
 }
 
 type config struct {
-	DatabaseURL   string
-	ListenAddr    string
-	JWTSecret     string
-	EncryptionKey []byte
-	PublicBaseURL string
-	Environment   string
-	BootstrapDemo bool
+	DatabaseDriver string
+	DatabaseURL    string
+	ListenAddr     string
+	JWTSecret      string
+	EncryptionKey  []byte
+	PublicBaseURL  string
+	Environment    string
+	BootstrapDemo  bool
 }
 
 func loadConfig() (config, error) {
 	cfg := config{
-		DatabaseURL:   env("DATABASE_URL", "postgres://tsumugi:tsumugi@localhost:5432/tsumugi_pay?sslmode=disable"),
-		ListenAddr:    env("LISTEN_ADDR", ":8080"),
-		JWTSecret:     env("JWT_SECRET", "change-this-development-jwt-secret"),
-		PublicBaseURL: strings.TrimRight(env("PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
-		Environment:   env("APP_ENV", "development"),
-		BootstrapDemo: env("BOOTSTRAP_DEMO", "true") == "true",
+		DatabaseDriver: env("DATABASE_DRIVER", "postgres"),
+		DatabaseURL:    env("DATABASE_URL", "postgres://tsumugi:tsumugi@localhost:5432/tsumugi_pay?sslmode=disable"),
+		ListenAddr:     env("LISTEN_ADDR", ":8080"),
+		JWTSecret:      env("JWT_SECRET", "change-this-development-jwt-secret"),
+		PublicBaseURL:  strings.TrimRight(env("PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
+		Environment:    env("APP_ENV", "development"),
+		BootstrapDemo:  env("BOOTSTRAP_DEMO", "true") == "true",
 	}
 	encodedKey := os.Getenv("APP_ENCRYPTION_KEY")
 	if encodedKey == "" {
