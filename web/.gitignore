@@ -1,0 +1,17 @@
+# Runtime logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies and local tooling
+node_modules
+dist-ssr
+*.local
+
+# Tsumugi Pay commits web/dist because Go embeds it into the release binary.
+!dist/
+!dist/**

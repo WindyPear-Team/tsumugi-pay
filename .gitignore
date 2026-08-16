@@ -1,0 +1,29 @@
+# Secrets and local configuration
+.env
+.env.local
+!.env.example
+
+# Local databases, editor files and OS artifacts
+*.db
+*.sqlite
+*.sqlite3
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Go build products
+*.exe
+*.test
+*.out
+coverage.out
+
+# React / Vite local dependencies and temporary cache
+web/node_modules/
+web/.yarn/cache/
+web/.yarn/install-state.gz
+web/.yarn/unplugged/
+web/.pnp.*
+web/.vite/
+
+# Keep web/dist tracked: it is embedded into the Go binary by web/embed.go.
