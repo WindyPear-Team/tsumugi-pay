@@ -1,9 +1,13 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -43,5 +47,42 @@ func TestNormalizeSQL(t *testing.T) {
 	query := normalizeSQL("mysql", `UPDATE bills SET updated_at=NOW() WHERE id=$1::uuid`)
 	if query != "UPDATE bills SET updated_at=CURRENT_TIMESTAMP WHERE id=?" {
 		t.Fatalf("unexpected normalized query: %s", query)
+	}
+}
+
+func TestOOBECreatesInitialAdministratorOnce(t *testing.T) {
+	database, err := OpenDatabase("sqlite", "file:tsumugi_oobe_test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	store := NewStore(database)
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate sqlite: %v", err)
+	}
+	service, err := New(Config{Database: store, JWTSecret: "test-secret", EncryptionKey: make([]byte, 32), PublicBaseURL: "http://localhost:8080", Environment: "development", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	handler := service.Routes()
+	status := httptest.NewRecorder()
+	handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/api/v1/setup/status", nil))
+	if status.Code != http.StatusOK || !bytes.Contains(status.Body.Bytes(), []byte(`"required":true`)) {
+		t.Fatalf("unexpected initial setup status: %d %s", status.Code, status.Body.String())
+	}
+	payload, _ := json.Marshal(map[string]string{"display_name": "First Admin", "email": "first@example.test", "password": "A-strong-password"})
+	setup := httptest.NewRecorder()
+	handler.ServeHTTP(setup, httptest.NewRequest(http.MethodPost, "/api/v1/setup/initialize", bytes.NewReader(payload)))
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("initialize setup: %d %s", setup.Code, setup.Body.String())
+	}
+	retry := httptest.NewRecorder()
+	handler.ServeHTTP(retry, httptest.NewRequest(http.MethodPost, "/api/v1/setup/initialize", bytes.NewReader(payload)))
+	if retry.Code != http.StatusConflict {
+		t.Fatalf("setup endpoint should close after initialization: %d %s", retry.Code, retry.Body.String())
+	}
+	login := httptest.NewRecorder()
+	handler.ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(payload)))
+	if login.Code != http.StatusOK {
+		t.Fatalf("login with OOBE administrator: %d %s", login.Code, login.Body.String())
 	}
 }

@@ -23,6 +23,8 @@ const providerName: Record<string, string> = { alipay: "支付宝", wechat: "微
 
 export default function App() {
   const [token, setToken] = useState(localStorage.getItem("tsumugi_access_token") || "");
+	const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
+	const [setupEmail, setSetupEmail] = useState("");
   const [view, setView] = useState<View>("overview");
   const [user, setUser] = useState<any>(null);
   const [tenants, setTenants] = useState<Tenant[]>([]);
@@ -89,11 +91,17 @@ export default function App() {
 
   useEffect(() => { if (token) loadInitial(); }, [token]);
   useEffect(() => { loadContent(); }, [view, tenantId, token]);
+	useEffect(() => {
+		if (token) return;
+		fetch(`${API}/api/v1/setup/status`).then((response) => response.ok ? response.json() : { required: false }).then((body) => setSetupRequired(Boolean(body.required))).catch(() => setSetupRequired(false));
+	}, [token]);
 
   function logout() { localStorage.removeItem("tsumugi_access_token"); localStorage.removeItem("tsumugi_tenant_id"); setToken(""); setUser(null); }
   function chooseTenant(id: string) { setTenantId(id); localStorage.setItem("tsumugi_tenant_id", id); }
 
-  if (!token) return <Login onSuccess={(value) => { localStorage.setItem("tsumugi_access_token", value); setToken(value); }} />;
+  if (!token && setupRequired === null) return <div className="login-page"><div className="login-panel"><div className="brand login-brand"><span className="brand-mark">T</span><span>Tsumugi <b>Pay</b></span></div><p className="demo-note">正在检查系统初始化状态…</p></div></div>;
+  if (!token && setupRequired) return <Setup onCompleted={(email) => { setSetupEmail(email); setSetupRequired(false); }} />;
+  if (!token) return <Login initialEmail={setupEmail} onSuccess={(value) => { localStorage.setItem("tsumugi_access_token", value); setToken(value); }} />;
 
   const nav: { key: View; label: string; icon: string; admin?: boolean }[] = [
     { key: "overview", label: "工作台", icon: "⌘" },
@@ -142,10 +150,16 @@ export default function App() {
   </SidebarProvider>;
 }
 
-function Login({ onSuccess }: { onSuccess: (token: string) => void }) {
-  const [email, setEmail] = useState("admin@tsumugi.local"); const [password, setPassword] = useState("ChangeMe123!"); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+function Login({ onSuccess, initialEmail = "" }: { onSuccess: (token: string) => void; initialEmail?: string }) {
+  const [email, setEmail] = useState(initialEmail || "admin@tsumugi.local"); const [password, setPassword] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { const response = await fetch(`${API}/api/v1/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) }); const result = await response.json(); if (!response.ok) throw new Error(result.message || "登录失败"); onSuccess(result.access_token); } catch (e: any) { setError(e.message); } finally { setBusy(false); } }
-  return <div className="login-page"><div className="login-panel"><div className="brand login-brand"><span className="brand-mark">T</span><span>Tsumugi <b>Pay</b></span></div><div className="login-copy"><p className="eyebrow">OPEN PAYMENT OPERATIONS</p><h1>掌控每一笔<br/><em>可信交易。</em></h1><p>为多租户业务而设计的统一支付运营平台，连接支付宝与微信支付官方能力。</p></div><form onSubmit={submit}><Label>邮箱<Input value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="email" /></Label><Label>密码<Input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="current-password" /></Label>{error && <p className="form-error">{error}</p>}<button className="primary-button full" disabled={busy}>{busy ? "正在验证…" : "进入支付运营中心"} <span>→</span></button></form><p className="demo-note">开发初始化账号已预填。首次进入生产环境前，请立即轮换默认凭据。</p></div><div className="login-art"><div className="orb orb-one"/><div className="orb orb-two"/><div className="transaction-card"><span>SETTLEMENT / LIVE</span><b>¥ 1,248,602.80</b><small>今日成功交易总额</small><div className="mini-bars"><i/><i/><i/><i/><i/><i/><i/></div></div><p>值得信赖的资金流，<br/>始于清晰的每一步。</p></div></div>;
+  return <div className="login-page"><div className="login-panel"><div className="brand login-brand"><span className="brand-mark">T</span><span>Tsumugi <b>Pay</b></span></div><div className="login-copy"><p className="eyebrow">OPEN PAYMENT OPERATIONS</p><h1>掌控每一笔<br/><em>可信交易。</em></h1><p>为多租户业务而设计的统一支付运营平台，连接支付宝与微信支付官方能力。</p></div><form onSubmit={submit}><Label>邮箱<Input value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="email" /></Label><Label>密码<Input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="current-password" /></Label>{error && <p className="form-error">{error}</p>}<button className="primary-button full" disabled={busy}>{busy ? "正在验证…" : "进入支付运营中心"} <span>→</span></button></form><p className="demo-note">{initialEmail ? "初始管理员已创建，请使用刚设定的密码登录。" : "开发初始化账号已预填。首次进入生产环境前，请立即轮换默认凭据。"}</p></div><div className="login-art"><div className="orb orb-one"/><div className="orb orb-two"/><div className="transaction-card"><span>SETTLEMENT / LIVE</span><b>¥ 1,248,602.80</b><small>今日成功交易总额</small><div className="mini-bars"><i/><i/><i/><i/><i/><i/><i/></div></div><p>值得信赖的资金流，<br/>始于清晰的每一步。</p></div></div>;
+}
+
+function Setup({ onCompleted }: { onCompleted: (email: string) => void }) {
+  const [displayName, setDisplayName] = useState(""); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [confirmPassword, setConfirmPassword] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent) { event.preventDefault(); if (password !== confirmPassword) { setError("两次输入的密码不一致"); return; } setBusy(true); setError(""); try { const response = await fetch(`${API}/api/v1/setup/initialize`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ display_name: displayName, email, password }) }); const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.message || "初始化失败"); onCompleted(email); } catch (e: any) { setError(e.message); } finally { setBusy(false); } }
+  return <div className="login-page"><div className="login-panel"><div className="brand login-brand"><span className="brand-mark">T</span><span>Tsumugi <b>Pay</b></span></div><div className="login-copy"><p className="eyebrow">FIRST-RUN SETUP</p><h1>欢迎使用<br/><em>Tsumugi Pay。</em></h1><p>创建首个平台管理员。完成后即可登录并创建租户、配置支付宝或微信支付通道。</p></div><form onSubmit={submit}><Label>管理员姓名<Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} autoComplete="name" required /></Label><Label>管理员邮箱<Input value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="email" required /></Label><Label>设置密码<Input value={password} onChange={(e) => setPassword(e.target.value)} type="password" minLength={10} autoComplete="new-password" required /></Label><Label>确认密码<Input value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} type="password" minLength={10} autoComplete="new-password" required /></Label>{error && <p className="form-error">{error}</p>}<button className="primary-button full" disabled={busy}>{busy ? "初始化中…" : "创建平台管理员"} <span>→</span></button></form><p className="demo-note">初始化入口只会在系统尚无用户时开放一次。</p></div><div className="login-art"><div className="orb orb-one"/><div className="orb orb-two"/><div className="transaction-card"><span>SECURE SETUP / STEP 1</span><b>平台初始化</b><small>多租户支付运营基础配置</small></div><p>从第一位管理员开始，<br/>建立可信的支付运营体系。</p></div></div>;
 }
 
 function Overview({ data, bills, setView }: { data: Dashboard | null; bills: Bill[]; setView: (view: View) => void }) {

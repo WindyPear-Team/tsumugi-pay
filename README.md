@@ -46,6 +46,10 @@ yarn dev
 
 开发环境首次启动会创建演示租户和登录账号，方便验证后台界面。账号为 `admin@tsumugi.local`，密码为 `ChangeMe123!`。**仅限本地开发**：部署生产系统时设置 `BOOTSTRAP_DEMO=false`，并在首次可访问时立即删除演示数据或轮换全部密钥。
 
+## 首次启动向导（OOBE）
+
+当数据库中尚无用户时，访问管理后台会自动进入首次启动向导，创建第一位**平台管理员**。向导完成后该入口会永久关闭，之后由平台管理员在“租户管理”和“成员与权限”中创建租户及租户成员。该流程适用于 `BOOTSTRAP_DEMO=false` 的生产首次部署；若启用了演示数据，则不会显示向导。
+
 | 配置项 | 开发默认值 | 生产要求 |
 | --- | --- | --- |
 | `DATABASE_DRIVER` | `postgres` | `postgres`、`mysql` 或 `sqlite`。 |
@@ -63,6 +67,8 @@ yarn dev
 | 方法 | 端点 | 用途 |
 | --- | --- | --- |
 | `POST` | `/api/v1/auth/login` | 后台用户登录。 |
+| `GET` | `/api/v1/setup/status` | 查询是否需要首次初始化。仅暴露是否需要初始化。 |
+| `POST` | `/api/v1/setup/initialize` | 系统无用户时创建首个平台管理员；一次性入口。 |
 | `GET` | `/api/v1/admin/me` | 当前会话身份与角色。 |
 | `GET` | `/api/v1/admin/dashboard` | 账单与成功金额汇总。 |
 | `GET` / `POST` | `/api/v1/admin/tenants` | 平台管理员列出或创建租户。 |

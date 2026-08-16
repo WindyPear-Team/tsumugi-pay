@@ -132,6 +132,8 @@ func (s *Service) Routes() http.Handler {
 	mux.HandleFunc("GET /api.php", s.legacyAPI)
 	mux.HandleFunc("POST /api.php", s.legacyAPI)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
+	mux.HandleFunc("GET /api/v1/setup/status", s.setupStatus)
+	mux.HandleFunc("POST /api/v1/setup/initialize", s.setupInitialize)
 	mux.HandleFunc("POST /api/v1/webhooks/alipay/{token}", s.alipayWebhook)
 	mux.HandleFunc("POST /api/v1/webhooks/wechat/{token}", s.wechatWebhook)
 	mux.Handle("/api/v1/admin/", s.auth(http.HandlerFunc(s.admin)))

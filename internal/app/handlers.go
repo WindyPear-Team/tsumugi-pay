@@ -285,6 +285,75 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"access_token": signed, "token_type": "Bearer", "expires_in": 28800, "user": map[string]any{"id": id, "email": claims.Email, "display_name": name, "role": role, "tenant_id": tenantID}})
 }
 
+// setupStatus is deliberately minimal: it only reveals whether an initial
+// administrator needs to be created, never any account or tenant metadata.
+func (s *Service) setupStatus(w http.ResponseWriter, r *http.Request) {
+	var users int
+	if err := s.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot determine setup state", requestID(r))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"required": users == 0})
+}
+
+// setupInitialize creates the one and only first platform administrator. A
+// database guard makes this endpoint single-use even if two browser tabs race.
+func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		DisplayName string `json:"display_name"`
+		Email       string `json:"email"`
+		Password    string `json:"password"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.DisplayName = strings.TrimSpace(input.DisplayName)
+	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
+	if input.DisplayName == "" || input.Email == "" || len(input.Password) < 10 {
+		writeError(w, http.StatusBadRequest, 40002, "display_name, email and a 10-character password are required", requestID(r))
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot secure password", requestID(r))
+		return
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot initialize setup", requestID(r))
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var existingUsers int
+	if err = tx.QueryRow(r.Context(), `SELECT COUNT(*) FROM users`).Scan(&existingUsers); err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot determine setup state", requestID(r))
+		return
+	}
+	if existingUsers != 0 {
+		writeError(w, http.StatusConflict, 40901, "initial setup has already been completed", requestID(r))
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `INSERT INTO system_settings (setting_key,setting_value) VALUES ($1,$2)`, "oobe_complete", nowUTC().Format(time.RFC3339)); err != nil {
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, 40901, "initial setup has already been completed", requestID(r))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, 50001, "cannot reserve setup", requestID(r))
+		return
+	}
+	adminID := uuid.New()
+	if _, err = tx.Exec(r.Context(), `INSERT INTO users (id,email,password_hash,display_name,role) VALUES ($1,$2,$3,$4,'platform_admin')`, adminID, input.Email, string(hash), input.DisplayName); err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot create initial administrator", requestID(r))
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot complete setup", requestID(r))
+		return
+	}
+	s.audit(r.Context(), nil, &adminID, "system.oobe_complete", "system", "initial_setup", requestID(r), map[string]string{"email": input.Email})
+	writeJSON(w, http.StatusCreated, map[string]any{"message": "initial administrator created", "user": map[string]any{"id": adminID, "email": input.Email, "display_name": input.DisplayName}})
+}
+
 func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin")
 	switch {
