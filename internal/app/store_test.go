@@ -132,6 +132,9 @@ func TestOOBECreatesInitialUserOnce(t *testing.T) {
 	if setup.Code != http.StatusCreated {
 		t.Fatalf("initialize setup: %d %s", setup.Code, setup.Body.String())
 	}
+	if !bytes.Contains(setup.Body.Bytes(), []byte(`"merchant_no":"1000"`)) {
+		t.Fatalf("initial merchant number should start at 1000: %s", setup.Body.String())
+	}
 	retry := httptest.NewRecorder()
 	handler.ServeHTTP(retry, httptest.NewRequest(http.MethodPost, "/api/v1/setup/initialize", bytes.NewReader(payload)))
 	if retry.Code != http.StatusConflict {

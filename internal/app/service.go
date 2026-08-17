@@ -100,7 +100,7 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	}
 	accountID := uuid.New()
 	return s.db.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&Account{ID: accountID, Name: "演示账户", MerchantNo: "100000", APISecretCiphertext: apiSecret, CallbackSecretCiphertext: callbackSecret}).Error; err != nil {
+		if err := tx.Create(&Account{ID: accountID, Name: "演示账户", MerchantNo: "1000", APISecretCiphertext: apiSecret, CallbackSecretCiphertext: callbackSecret}).Error; err != nil {
 			return err
 		}
 		return tx.Create(&User{ID: uuid.New(), AccountID: &accountID, Email: "admin@tsumugi.local", PasswordHash: string(passwordHash), DisplayName: "演示用户", Role: "user", IsActive: true}).Error

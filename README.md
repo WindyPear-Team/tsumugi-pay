@@ -100,7 +100,7 @@ yarn dev
 
 ```json
 {
-  "merchant_id": "100000",
+  "merchant_id": "1000",
   "payment_method": "alipay",
   "merchant_order_no": "ORDER-20260816-001",
   "subject": "月度订阅",

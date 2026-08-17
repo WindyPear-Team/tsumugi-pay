@@ -101,7 +101,7 @@ func (s *Service) discovery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"spec": "Open Payment Specification", "spec_version": "1.0.0", "profile": []string{"OPS-EPAY-1", "OPS-CORE-1", "OPS-EXT-1"},
 		"platform":        map[string]any{"name": "Tsumugi Pay", "vendor": "tsumugi", "homepage": base, "charset": "utf-8", "timezone": "Asia/Shanghai", "currency": "CNY"},
-		"endpoints":       map[string]any{"submit": base + "/submit.php", "mapi": base + "/mapi.php", "api": base + "/api.php", "query": base + "/api.php?act=order", "refund": base + "/api.php?act=refund", "close": base + "/api.php?act=close"},
+		"endpoints":       map[string]any{"submit": base + "/submit.php", "mapi": base + "/mapi.php", "api": base + "/api.php", "query": base + "/api.php?act=order"},
 		"transports":      map[string]any{"payment_create": []string{"form_post", "json"}, "query": []string{"form_get", "form_post"}, "refund": []string{"json"}, "notify": []string{"form_post"}},
 		"signing":         map[string]any{"default": "HMAC-SHA256", "supported": []string{"MD5", "HMAC-SHA256"}, "sign_field": "sign", "sign_type_field": "sign_type", "empty_value_policy": "omit", "sort": "ascii_asc", "charset": "utf-8"},
 		"payment_methods": []map[string]any{{"code": "alipay", "name": "支付宝", "aliases": []string{"alipay", "ali"}, "scenes": []string{"pc", "wap"}, "enabled": true}, {"code": "wxpay", "name": "微信支付", "aliases": []string{"wxpay", "wechat"}, "scenes": []string{"pc", "wap", "qr", "jsapi"}, "enabled": true}},
@@ -379,7 +379,12 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.MerchantNo == "" {
-		input.MerchantNo = "M" + strings.ToUpper(randomToken(8))
+		input.MerchantNo = "1000"
+	}
+	merchantNo, parseErr := strconv.ParseInt(input.MerchantNo, 10, 64)
+	if parseErr != nil || merchantNo < 1000 || input.MerchantNo != strconv.FormatInt(merchantNo, 10) {
+		writeError(w, http.StatusBadRequest, 40002, "merchant_no must be a decimal number starting at 1000", requestID(r))
+		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	if err != nil {
