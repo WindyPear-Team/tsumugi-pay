@@ -47,16 +47,16 @@ type Service struct {
 }
 
 type principal struct {
-	UserID   uuid.UUID
-	TenantID *uuid.UUID
-	Role     string
-	Email    string
+	UserID    uuid.UUID
+	AccountID *uuid.UUID
+	Role      string
+	Email     string
 }
 
 type jwtClaims struct {
-	TenantID string `json:"tenant_id,omitempty"`
-	Role     string `json:"role"`
-	Email    string `json:"email"`
+	AccountID string `json:"account_id,omitempty"`
+	Role      string `json:"role"`
+	Email     string `json:"email"`
 	jwt.RegisteredClaims
 }
 
@@ -104,14 +104,14 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	tenantID := uuid.New()
-	if _, err := tx.Exec(ctx, `INSERT INTO tenants (id,name, merchant_no, api_secret_ciphertext, callback_secret_ciphertext) VALUES ($1,$2,$3,$4,$5)`, tenantID, "演示租户", "100000", apiSecret, callbackSecret); err != nil {
+	accountID := uuid.New()
+	if _, err := tx.Exec(ctx, `INSERT INTO accounts (id,name, merchant_no, api_secret_ciphertext, callback_secret_ciphertext) VALUES ($1,$2,$3,$4,$5)`, accountID, "演示租户", "100000", apiSecret, callbackSecret); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO users (id,email, password_hash, display_name, role) VALUES ($1,$2,$3,$4,'platform_admin')`, uuid.New(), "admin@tsumugi.local", string(passwordHash), "平台管理员"); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO users (id,tenant_id, email, password_hash, display_name, role) VALUES ($1,$2,$3,$4,$5,'user')`, uuid.New(), tenantID, "merchant@tsumugi.local", string(passwordHash), "演示用户"); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO users (id,account_id, email, password_hash, display_name, role) VALUES ($1,$2,$3,$4,$5,'user')`, uuid.New(), accountID, "merchant@tsumugi.local", string(passwordHash), "演示用户"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -140,7 +140,7 @@ func (s *Service) middleware(next http.Handler) http.Handler {
 		requestID := "req_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20]
 		w.Header().Set("X-Request-ID", requestID)
 		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Tenant-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Account-ID")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -185,16 +185,16 @@ func (s *Service) auth(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, 40102, "invalid access token subject", requestID(r))
 			return
 		}
-		var tenantID *uuid.UUID
-		if claims.TenantID != "" {
-			parsed, err := uuid.Parse(claims.TenantID)
+		var accountID *uuid.UUID
+		if claims.AccountID != "" {
+			parsed, err := uuid.Parse(claims.AccountID)
 			if err != nil {
-				writeError(w, http.StatusUnauthorized, 40102, "invalid access token tenant", requestID(r))
+				writeError(w, http.StatusUnauthorized, 40102, "invalid access token account", requestID(r))
 				return
 			}
-			tenantID = &parsed
+			accountID = &parsed
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, principal{UserID: userID, TenantID: tenantID, Role: claims.Role, Email: claims.Email})))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, principal{UserID: userID, AccountID: accountID, Role: claims.Role, Email: claims.Email})))
 	})
 }
 
@@ -280,9 +280,9 @@ func parseAmount(value string) (int64, error) {
 	}
 	return whole*100 + cents, nil
 }
-func (s *Service) audit(ctx context.Context, tenantID *uuid.UUID, actor *uuid.UUID, action, targetType, targetID, rid string, detail any) {
+func (s *Service) audit(ctx context.Context, accountID *uuid.UUID, actor *uuid.UUID, action, targetType, targetID, rid string, detail any) {
 	bytes, _ := json.Marshal(detail)
-	_, err := s.db.Exec(ctx, `INSERT INTO audit_logs (id,tenant_id,actor_user_id,action,target_type,target_id,request_id,detail) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, uuid.New(), tenantID, actor, action, targetType, targetID, rid, bytes)
+	_, err := s.db.Exec(ctx, `INSERT INTO audit_logs (id,account_id,actor_user_id,action,target_type,target_id,request_id,detail) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, uuid.New(), accountID, actor, action, targetType, targetID, rid, bytes)
 	if err != nil {
 		s.logger.Error("audit log failed", "error", err)
 	}

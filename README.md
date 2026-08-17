@@ -62,7 +62,7 @@ yarn dev
 
 ## 后台管理端点
 
-后台端点通过 `POST /api/v1/auth/login` 获取 JWT，并在后续请求中使用 `Authorization: Bearer <token>`。平台管理员可在请求头中追加 `X-Tenant-ID` 选择管理租户；租户用户始终被限制在自身租户范围。
+后台端点通过 `POST /api/v1/auth/login` 获取 JWT，并在后续请求中使用 `Authorization: Bearer <token>`。平台管理员可在请求头中追加 `X-Account-ID` 选择管理租户；租户用户始终被限制在自身租户范围。
 
 | 方法 | 端点 | 用途 |
 | --- | --- | --- |
@@ -71,8 +71,8 @@ yarn dev
 | `POST` | `/api/v1/setup/initialize` | 系统无用户时创建首位用户及其支付工作区；一次性入口。 |
 | `GET` | `/api/v1/admin/me` | 当前会话身份与角色。 |
 | `GET` | `/api/v1/admin/dashboard` | 账单与成功金额汇总。 |
-| `GET` / `POST` | `/api/v1/admin/tenants` | 平台管理员列出或创建租户。 |
-| `PATCH` | `/api/v1/admin/tenants/:id` | 修改租户状态或轮换 API、回调密钥。 |
+| `GET` / `POST` | `/api/v1/admin/accounts` | 平台管理员列出或创建租户。 |
+| `PATCH` | `/api/v1/admin/accounts/:id` | 修改租户状态或轮换 API、回调密钥。 |
 | `GET` / `POST` | `/api/v1/admin/users` | 租户内用户管理。 |
 | `GET` / `POST` | `/api/v1/admin/channels` | 当前用户查询或添加自己的支付宝、微信支付通道。 |
 | `PATCH` | `/api/v1/admin/channels/:id` | 保存官方凭据、修改名称及启停通道。 |
