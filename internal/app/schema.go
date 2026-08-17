@@ -26,6 +26,18 @@ func (s *Store) Migrate(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("auto migrate schema: %w", err)
 	}
+	var administrators int64
+	if err := s.db.WithContext(ctx).Model(&User{}).Where("role = ?", "platform_admin").Count(&administrators).Error; err != nil {
+		return err
+	}
+	if administrators == 0 {
+		var first User
+		if err := s.db.WithContext(ctx).Order("created_at ASC").First(&first).Error; err == nil {
+			if err := s.db.WithContext(ctx).Model(&User{}).Where("id = ?", first.ID).Update("role", "platform_admin").Error; err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

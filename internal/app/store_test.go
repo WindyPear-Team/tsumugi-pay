@@ -219,3 +219,80 @@ func TestOOBECreatesInitialUserOnce(t *testing.T) {
 		t.Fatalf("reconciled bill should be paid with provider trade id: %+v, err=%v", bill, err)
 	}
 }
+
+func TestSiteAccessControlsAndUserManagement(t *testing.T) {
+	database, err := OpenDatabase("sqlite", "file:tsumugi_site_controls_test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	store := NewStore(database)
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate sqlite: %v", err)
+	}
+	service, err := New(Config{Database: store, JWTSecret: "test-secret", EncryptionKey: make([]byte, 32), PublicBaseURL: "http://localhost:8080", Environment: "development", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	handler := service.Routes()
+	setupBody, _ := json.Marshal(map[string]string{"account_name": "Platform", "display_name": "Platform Admin", "email": "admin@example.test", "password": "A-strong-password"})
+	setup := httptest.NewRecorder()
+	handler.ServeHTTP(setup, httptest.NewRequest(http.MethodPost, "/api/v1/setup/initialize", bytes.NewReader(setupBody)))
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("setup: %d %s", setup.Code, setup.Body.String())
+	}
+	adminToken := loginToken(t, handler, "admin@example.test", "A-strong-password")
+
+	siteBody := bytes.NewBufferString(`{"site":{"site_name":"Example Pay","allow_password_login":true,"allow_password_registration":true,"email_whitelist":["@allowed.test"],"terms_url":"https://example.test/terms","privacy_policy_url":"https://example.test/privacy"}}`)
+	siteRequest := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/site-settings", siteBody)
+	siteRequest.Header.Set("Authorization", "Bearer "+adminToken)
+	siteRequest.Header.Set("Content-Type", "application/json")
+	siteResponse := httptest.NewRecorder()
+	handler.ServeHTTP(siteResponse, siteRequest)
+	if siteResponse.Code != http.StatusOK || !bytes.Contains(siteResponse.Body.Bytes(), []byte(`"site_name":"Example Pay"`)) {
+		t.Fatalf("save site config: %d %s", siteResponse.Code, siteResponse.Body.String())
+	}
+
+	blockedRegistration := httptest.NewRecorder()
+	handler.ServeHTTP(blockedRegistration, httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewBufferString(`{"account_name":"Blocked","display_name":"Blocked","email":"blocked@other.test","password":"A-strong-password"}`)))
+	if blockedRegistration.Code != http.StatusForbidden {
+		t.Fatalf("blocked registration: %d %s", blockedRegistration.Code, blockedRegistration.Body.String())
+	}
+	registration := httptest.NewRecorder()
+	handler.ServeHTTP(registration, httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewBufferString(`{"account_name":"Allowed","display_name":"Allowed User","email":"user@allowed.test","password":"A-strong-password"}`)))
+	if registration.Code != http.StatusCreated || !bytes.Contains(registration.Body.Bytes(), []byte(`"merchant_no":"1001"`)) {
+		t.Fatalf("allowed registration: %d %s", registration.Code, registration.Body.String())
+	}
+	userToken := loginToken(t, handler, "user@allowed.test", "A-strong-password")
+	settingsRequest := httptest.NewRequest(http.MethodGet, "/api/v1/admin/site-settings", nil)
+	settingsRequest.Header.Set("Authorization", "Bearer "+userToken)
+	settingsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(settingsResponse, settingsRequest)
+	if settingsResponse.Code != http.StatusForbidden {
+		t.Fatalf("ordinary user must not access site settings: %d %s", settingsResponse.Code, settingsResponse.Body.String())
+	}
+
+	usersRequest := httptest.NewRequest(http.MethodGet, "/api/v1/admin/users", nil)
+	usersRequest.Header.Set("Authorization", "Bearer "+adminToken)
+	usersResponse := httptest.NewRecorder()
+	handler.ServeHTTP(usersResponse, usersRequest)
+	if usersResponse.Code != http.StatusOK || !bytes.Contains(usersResponse.Body.Bytes(), []byte(`"email":"user@allowed.test"`)) {
+		t.Fatalf("list users: %d %s", usersResponse.Code, usersResponse.Body.String())
+	}
+}
+
+func loginToken(t *testing.T, handler http.Handler, email, password string) string {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("login %s: %d %s", email, response.Code, response.Body.String())
+	}
+	var body struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.AccessToken == "" {
+		t.Fatalf("decode login response: %v, %s", err, response.Body.String())
+	}
+	return body.AccessToken
+}

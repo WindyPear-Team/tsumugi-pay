@@ -74,3 +74,13 @@ button { cursor: pointer; }
 [data-slot="select-trigger"] { background: #fff; border-color: #dce4dd; color: #284238; }
 [data-slot="select-content"] { background: #fff; color: #284238; border: 1px solid #dce4dd; }
 [data-slot="select-item"]:focus, [data-slot="select-item"][data-highlighted] { background: #e8f5ef; color: #214c42; }
+.text-button { display: block; width: 100%; margin-top: 14px; padding: 7px; border: 0; color: #277d6b; background: transparent; font-size: 12px; font-weight: 700; text-align: center; }
+.register-form { margin-top: 18px; padding-top: 17px; border-top: 1px solid #e1eae4; }
+.register-form .eyebrow { margin-bottom: 6px; }
+.form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 17px; }
+.form-success { margin: 10px 0 0; color: #25836e; font-size: 11px; line-height: 1.5; }
+.form-note { margin: 10px 0; color: #738981; font-size: 11px; line-height: 1.5; }
+.policy-links { margin: 16px 0 0; color: #7d938b; font-size: 11px; text-align: center; }
+.policy-links a { color: #397b6a; text-decoration: none; }
+.auth-disabled { max-width: 380px; color: #637b72; font-size: 13px; }
+.table-action { min-width: 54px; padding: 6px 9px; font-size: 11px; }

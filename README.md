@@ -68,9 +68,13 @@ yarn dev
 | 方法 | 端点 | 用途 |
 | --- | --- | --- |
 | `POST` | `/api/v1/auth/login` | 后台用户登录。 |
+| `POST` | `/api/v1/auth/register` | 开启密码注册且邮箱命中白名单时，创建独立用户账户。 |
+| `GET` | `/api/v1/site-config` | 获取公开的站点名称、登录注册开关与协议链接。 |
 | `GET` | `/api/v1/setup/status` | 查询是否需要首次初始化。仅暴露是否需要初始化。 |
 | `POST` | `/api/v1/setup/initialize` | 系统无用户时创建首位用户及其支付工作区；一次性入口。 |
 | `GET` | `/api/v1/admin/me` | 当前会话身份与角色。 |
+| `GET` / `POST` | `/api/v1/admin/users` | 平台管理员查询或创建用户；新用户拥有独立账户和自动递增的数字商户号。 |
+| `PATCH` | `/api/v1/admin/users/:id` | 平台管理员启用、停用或更名用户。 |
 | `GET` | `/api/v1/admin/dashboard` | 账单与成功金额汇总。 |
 | `GET` / `POST` | `/api/v1/admin/channels` | 查询或添加自己的支付宝、微信支付通道；同一服务商可添加多个。 |
 | `PATCH` | `/api/v1/admin/channels/:id` | 保存官方凭据、修改名称、优先级、权重及启停状态。 |
@@ -80,7 +84,7 @@ yarn dev
 | `POST` | `/api/v1/admin/bills/:id/refunds` | 使用退款单号发起退款。 |
 | `GET` | `/api/v1/admin/refunds` | 退款列表。 |
 | `GET` | `/api/v1/admin/audit-logs` | 管理和资金操作审计记录。 |
-| `GET` / `PATCH` | `/api/v1/admin/site-settings` | 当前用户账户的 SMTP、hCaptcha 与 OIDC 服务配置；敏感密钥不会回显。 |
+| `GET` / `PATCH` | `/api/v1/admin/site-settings` | 仅平台管理员可管理站点名称、密码登录/注册、邮箱白名单、协议链接及 SMTP、hCaptcha、OIDC 配置；敏感密钥不会回显。 |
 
 ## OPS 与易支付兼容端点
 

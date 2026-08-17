@@ -75,6 +75,14 @@ type accountSiteSettings struct {
 	HCaptcha hcaptchaSiteConfig
 	OIDC     oidcSiteConfig
 }
+type siteConfig struct {
+	SiteName                  string   `json:"site_name"`
+	AllowPasswordLogin        bool     `json:"allow_password_login"`
+	AllowPasswordRegistration bool     `json:"allow_password_registration"`
+	EmailWhitelist            []string `json:"email_whitelist"`
+	TermsURL                  string   `json:"terms_url"`
+	PrivacyPolicyURL          string   `json:"privacy_policy_url"`
+}
 type paymentInput struct {
 	MerchantID      string `json:"merchant_id"`
 	PaymentMethod   string `json:"payment_method"`
@@ -325,6 +333,15 @@ func (s *Service) publicQuery(w http.ResponseWriter, r *http.Request, input paym
 }
 
 func (s *Service) login(w http.ResponseWriter, r *http.Request) {
+	config, err := s.loadSiteConfig(r.Context())
+	if err != nil {
+		writeError(w, 500, 50001, "cannot load site configuration", requestID(r))
+		return
+	}
+	if !config.AllowPasswordLogin {
+		writeError(w, http.StatusForbidden, 40301, "password login is disabled", requestID(r))
+		return
+	}
 	var input struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
@@ -333,7 +350,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var user User
-	err := s.db.DB().WithContext(r.Context()).Where("email = ?", strings.ToLower(strings.TrimSpace(input.Email))).Take(&user).Error
+	err = s.db.DB().WithContext(r.Context()).Where("email = ?", strings.ToLower(strings.TrimSpace(input.Email))).Take(&user).Error
 	if err != nil || !user.IsActive || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)) != nil {
 		writeError(w, 401, 40103, "invalid email or password", requestID(r))
 		return
@@ -360,6 +377,86 @@ func (s *Service) setupStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"required": users == 0})
+}
+
+func (s *Service) getPublicSiteConfig(w http.ResponseWriter, r *http.Request) {
+	config, err := s.loadSiteConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot load site configuration", requestID(r))
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
+}
+
+func (s *Service) register(w http.ResponseWriter, r *http.Request) {
+	config, err := s.loadSiteConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot load site configuration", requestID(r))
+		return
+	}
+	if !config.AllowPasswordRegistration {
+		writeError(w, http.StatusForbidden, 40301, "password registration is disabled", requestID(r))
+		return
+	}
+	var input struct {
+		DisplayName string `json:"display_name"`
+		AccountName string `json:"account_name"`
+		Email       string `json:"email"`
+		Password    string `json:"password"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.DisplayName, input.AccountName, input.Email = strings.TrimSpace(input.DisplayName), strings.TrimSpace(input.AccountName), strings.ToLower(strings.TrimSpace(input.Email))
+	if input.DisplayName == "" || input.AccountName == "" || input.Email == "" || len(input.Password) < 10 {
+		writeError(w, http.StatusBadRequest, 40002, "account_name, display_name, email and a 10-character password are required", requestID(r))
+		return
+	}
+	if !emailAllowed(input.Email, config.EmailWhitelist) {
+		writeError(w, http.StatusForbidden, 40301, "email is not permitted to register", requestID(r))
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeError(w, 500, 50001, "cannot secure password", requestID(r))
+		return
+	}
+	accountID, userID := uuid.New(), uuid.New()
+	apiSecret, callbackSecret := randomToken(32), randomToken(32)
+	apiCiphertext, err := s.encrypt(apiSecret)
+	if err != nil {
+		writeError(w, 500, 50001, "cannot secure account credentials", requestID(r))
+		return
+	}
+	callbackCiphertext, err := s.encrypt(callbackSecret)
+	if err != nil {
+		writeError(w, 500, 50001, "cannot secure account credentials", requestID(r))
+		return
+	}
+	var merchantNo string
+	err = s.db.DB().WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		var accounts []Account
+		if err := tx.Select("merchant_no").Find(&accounts).Error; err != nil {
+			return err
+		}
+		max := int64(999)
+		for _, account := range accounts {
+			if value, parseErr := strconv.ParseInt(account.MerchantNo, 10, 64); parseErr == nil && value > max {
+				max = value
+			}
+		}
+		merchantNo = strconv.FormatInt(max+1, 10)
+		if err := tx.Create(&Account{ID: accountID, Name: input.AccountName, MerchantNo: merchantNo, APISecretCiphertext: apiCiphertext, CallbackSecretCiphertext: callbackCiphertext}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&User{ID: userID, AccountID: &accountID, Email: input.Email, PasswordHash: string(hash), DisplayName: input.DisplayName, Role: "user", IsActive: true}).Error
+	})
+	if err != nil {
+		writeError(w, http.StatusConflict, 40006, "cannot create user account", requestID(r))
+		return
+	}
+	s.audit(r.Context(), &accountID, &userID, "user.register", "user", userID.String(), requestID(r), map[string]string{"email": input.Email})
+	writeJSON(w, http.StatusCreated, map[string]any{"user": map[string]any{"id": userID, "email": input.Email, "display_name": input.DisplayName}, "account": map[string]any{"id": accountID, "name": input.AccountName, "merchant_no": merchantNo}, "credentials": map[string]string{"api_secret": apiSecret, "callback_secret": callbackSecret}})
 }
 
 // setupInitialize creates the one and only first platform administrator. A
@@ -420,7 +517,7 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 		if err := tx.Create(&Account{ID: accountID, Name: input.AccountName, MerchantNo: input.MerchantNo, APISecretCiphertext: apiCiphertext, CallbackSecretCiphertext: callbackCiphertext}).Error; err != nil {
 			return err
 		}
-		return tx.Create(&User{ID: adminID, AccountID: &accountID, Email: input.Email, PasswordHash: string(hash), DisplayName: input.DisplayName, Role: "user", IsActive: true}).Error
+		return tx.Create(&User{ID: adminID, AccountID: &accountID, Email: input.Email, PasswordHash: string(hash), DisplayName: input.DisplayName, Role: "platform_admin", IsActive: true}).Error
 	})
 	if err != nil {
 		if errors.Is(err, errSetupComplete) || isUniqueViolation(err) {
@@ -431,7 +528,7 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r.Context(), &accountID, &adminID, "system.oobe_complete", "account", accountID.String(), requestID(r), map[string]string{"email": input.Email, "account_name": input.AccountName})
-	writeJSON(w, http.StatusCreated, map[string]any{"message": "initial user created", "user": map[string]any{"id": adminID, "email": input.Email, "display_name": input.DisplayName, "role": "user"}, "account": map[string]any{"id": accountID, "name": input.AccountName, "merchant_no": input.MerchantNo}, "credentials": map[string]string{"api_secret": apiSecret, "callback_secret": callbackSecret}})
+	writeJSON(w, http.StatusCreated, map[string]any{"message": "initial user created", "user": map[string]any{"id": adminID, "email": input.Email, "display_name": input.DisplayName, "role": "platform_admin"}, "account": map[string]any{"id": accountID, "name": input.AccountName, "merchant_no": input.MerchantNo}, "credentials": map[string]string{"api_secret": apiSecret, "callback_secret": callbackSecret}})
 }
 
 func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
@@ -441,6 +538,16 @@ func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
 		s.adminMe(w, r)
 	case r.Method == "GET" && path == "/dashboard":
 		s.dashboard(w, r)
+	case path == "/users":
+		if r.Method == "GET" {
+			s.listUsers(w, r)
+		} else if r.Method == "POST" {
+			s.createUser(w, r)
+		} else {
+			methodNotAllowed(w, r)
+		}
+	case strings.HasPrefix(path, "/users/") && r.Method == "PATCH":
+		s.patchUser(w, r, strings.TrimPrefix(path, "/users/"))
 	case path == "/channels":
 		if r.Method == "GET" {
 			s.listChannels(w, r)
@@ -504,7 +611,14 @@ func (s *Service) getSiteSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, 50001, "cannot load site settings", requestID(r))
 		return
 	}
-	writeJSON(w, http.StatusOK, siteSettingsPublic(settings))
+	config, err := s.loadSiteConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot load site configuration", requestID(r))
+		return
+	}
+	response := siteSettingsPublic(settings)
+	response["site"] = config
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Service) patchSiteSettings(w http.ResponseWriter, r *http.Request) {
@@ -513,12 +627,19 @@ func (s *Service) patchSiteSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
+		Site     *siteConfig         `json:"site"`
 		Email    *smtpSiteConfig     `json:"email"`
 		HCaptcha *hcaptchaSiteConfig `json:"hcaptcha"`
 		OIDC     *oidcSiteConfig     `json:"oidc"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
+	}
+	if input.Site != nil {
+		if err := s.saveSiteConfig(r.Context(), *input.Site); err != nil {
+			writeError(w, http.StatusInternalServerError, 50001, "cannot save site configuration", requestID(r))
+			return
+		}
 	}
 	settings, exists, err := s.loadAccountSettings(r.Context(), *accountID)
 	if err != nil {
@@ -564,8 +685,11 @@ func (s *Service) patchSiteSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := currentPrincipal(r)
-	s.audit(r.Context(), accountID, &p.UserID, "site_settings.update", "site_settings", accountID.String(), requestID(r), map[string]bool{"email": input.Email != nil, "hcaptcha": input.HCaptcha != nil, "oidc": input.OIDC != nil})
-	writeJSON(w, http.StatusOK, siteSettingsPublic(settings))
+	s.audit(r.Context(), accountID, &p.UserID, "site_settings.update", "site_settings", accountID.String(), requestID(r), map[string]bool{"site": input.Site != nil, "email": input.Email != nil, "hcaptcha": input.HCaptcha != nil, "oidc": input.OIDC != nil})
+	config, _ := s.loadSiteConfig(r.Context())
+	response := siteSettingsPublic(settings)
+	response["site"] = config
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Service) discoverOIDC(w http.ResponseWriter, r *http.Request) {
@@ -626,8 +750,8 @@ func (s *Service) discoverOIDC(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) siteSettingsAccount(w http.ResponseWriter, r *http.Request) (*uuid.UUID, bool) {
 	p := currentPrincipal(r)
-	if p.Role != "user" {
-		writeError(w, http.StatusForbidden, 40301, "user account required", requestID(r))
+	if p.Role != "platform_admin" {
+		writeError(w, http.StatusForbidden, 40301, "platform administrator required", requestID(r))
 		return nil, false
 	}
 	accountID, ok := s.scopedAccount(w, r)
@@ -661,6 +785,59 @@ func (s *Service) loadAccountSettings(ctx context.Context, accountID uuid.UUID) 
 	}
 	return settings, true, nil
 }
+func defaultSiteConfig() siteConfig {
+	return siteConfig{SiteName: "Tsumugi Pay", AllowPasswordLogin: true, AllowPasswordRegistration: false, EmailWhitelist: []string{}}
+}
+func (s *Service) loadSiteConfig(ctx context.Context) (siteConfig, error) {
+	config := defaultSiteConfig()
+	var setting SystemSetting
+	err := s.db.DB().WithContext(ctx).Take(&setting, "setting_key = ?", "site_config").Error
+	if isNoRows(err) {
+		return config, nil
+	}
+	if err != nil {
+		return config, err
+	}
+	if err := json.Unmarshal([]byte(setting.SettingValue), &config); err != nil {
+		return config, err
+	}
+	if config.SiteName == "" {
+		config.SiteName = defaultSiteConfig().SiteName
+	}
+	return config, nil
+}
+func (s *Service) saveSiteConfig(ctx context.Context, config siteConfig) error {
+	config.SiteName = strings.TrimSpace(config.SiteName)
+	if config.SiteName == "" {
+		config.SiteName = defaultSiteConfig().SiteName
+	}
+	config.EmailWhitelist = compactStrings(config.EmailWhitelist)
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	return s.db.DB().WithContext(ctx).Save(&SystemSetting{SettingKey: "site_config", SettingValue: string(encoded)}).Error
+}
+func compactStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.ToLower(strings.TrimSpace(value)); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+func emailAllowed(email string, whitelist []string) bool {
+	if len(whitelist) == 0 {
+		return true
+	}
+	for _, entry := range whitelist {
+		if entry == email || strings.HasPrefix(entry, "@") && strings.HasSuffix(email, entry) {
+			return true
+		}
+	}
+	return false
+}
 
 func (s *Service) encryptConfig(value any) (string, error) {
 	encoded, err := json.Marshal(value)
@@ -685,6 +862,124 @@ func siteSettingsPublic(settings accountSiteSettings) map[string]any {
 		"hcaptcha": map[string]any{"enabled": settings.HCaptcha.Enabled, "site_key": settings.HCaptcha.SiteKey, "secret_key_configured": settings.HCaptcha.SecretKey != ""},
 		"oidc":     map[string]any{"enabled": settings.OIDC.Enabled, "issuer_url": settings.OIDC.IssuerURL, "client_id": settings.OIDC.ClientID, "redirect_url": settings.OIDC.RedirectURL, "authorization_endpoint": settings.OIDC.AuthorizationEndpoint, "token_endpoint": settings.OIDC.TokenEndpoint, "jwks_uri": settings.OIDC.JWKSURI, "client_secret_configured": settings.OIDC.ClientSecret != ""},
 	}
+}
+
+func (s *Service) listUsers(w http.ResponseWriter, r *http.Request) {
+	p := currentPrincipal(r)
+	if p.Role != "platform_admin" {
+		writeError(w, 403, 40301, "platform administrator required", requestID(r))
+		return
+	}
+	var users []User
+	if err := s.db.DB().WithContext(r.Context()).Preload("Account").Order("created_at DESC").Find(&users).Error; err != nil {
+		writeError(w, 500, 50001, "cannot load users", requestID(r))
+		return
+	}
+	items := make([]map[string]any, 0, len(users))
+	for _, user := range users {
+		item := map[string]any{"id": user.ID, "email": user.Email, "display_name": user.DisplayName, "role": user.Role, "is_active": user.IsActive, "created_at": user.CreatedAt}
+		if user.Account != nil {
+			item["account"] = map[string]any{"name": user.Account.Name, "merchant_no": user.Account.MerchantNo}
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, 200, map[string]any{"items": items})
+}
+func (s *Service) createUser(w http.ResponseWriter, r *http.Request) {
+	p := currentPrincipal(r)
+	if p.Role != "platform_admin" {
+		writeError(w, 403, 40301, "platform administrator required", requestID(r))
+		return
+	}
+	var input struct {
+		DisplayName string `json:"display_name"`
+		Email       string `json:"email"`
+		Password    string `json:"password"`
+		AccountName string `json:"account_name"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.DisplayName, input.Email, input.AccountName = strings.TrimSpace(input.DisplayName), strings.ToLower(strings.TrimSpace(input.Email)), strings.TrimSpace(input.AccountName)
+	if input.DisplayName == "" || input.Email == "" || input.AccountName == "" || len(input.Password) < 10 {
+		writeError(w, 400, 40002, "account_name, display_name, email and a 10-character password are required", requestID(r))
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeError(w, 500, 50001, "cannot secure password", requestID(r))
+		return
+	}
+	accountID, userID := uuid.New(), uuid.New()
+	api, callback := randomToken(32), randomToken(32)
+	apiCipher, err := s.encrypt(api)
+	if err != nil {
+		writeError(w, 500, 50001, "cannot secure account credentials", requestID(r))
+		return
+	}
+	callbackCipher, err := s.encrypt(callback)
+	if err != nil {
+		writeError(w, 500, 50001, "cannot secure account credentials", requestID(r))
+		return
+	}
+	var merchantNo string
+	err = s.db.DB().WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		var accounts []Account
+		if err := tx.Select("merchant_no").Find(&accounts).Error; err != nil {
+			return err
+		}
+		maximum := int64(999)
+		for _, account := range accounts {
+			if value, parseErr := strconv.ParseInt(account.MerchantNo, 10, 64); parseErr == nil && value > maximum {
+				maximum = value
+			}
+		}
+		merchantNo = strconv.FormatInt(maximum+1, 10)
+		if err := tx.Create(&Account{ID: accountID, Name: input.AccountName, MerchantNo: merchantNo, APISecretCiphertext: apiCipher, CallbackSecretCiphertext: callbackCipher}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&User{ID: userID, AccountID: &accountID, Email: input.Email, PasswordHash: string(hash), DisplayName: input.DisplayName, Role: "user", IsActive: true}).Error
+	})
+	if err != nil {
+		writeError(w, 409, 40006, "cannot create user", requestID(r))
+		return
+	}
+	s.audit(r.Context(), &accountID, &p.UserID, "user.create", "user", userID.String(), requestID(r), map[string]string{"email": input.Email})
+	writeJSON(w, 201, map[string]any{"id": userID, "email": input.Email, "merchant_no": merchantNo, "credentials": map[string]string{"api_secret": api, "callback_secret": callback}})
+}
+func (s *Service) patchUser(w http.ResponseWriter, r *http.Request, idText string) {
+	p := currentPrincipal(r)
+	if p.Role != "platform_admin" {
+		writeError(w, 403, 40301, "platform administrator required", requestID(r))
+		return
+	}
+	id, err := uuid.Parse(idText)
+	if err != nil {
+		writeError(w, 400, 40002, "invalid user id", requestID(r))
+		return
+	}
+	var input struct {
+		IsActive    *bool   `json:"is_active"`
+		DisplayName *string `json:"display_name"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	updates := map[string]any{}
+	if input.IsActive != nil {
+		updates["is_active"] = *input.IsActive
+	}
+	if input.DisplayName != nil {
+		updates["display_name"] = strings.TrimSpace(*input.DisplayName)
+	}
+	if len(updates) > 0 {
+		if err := s.db.DB().WithContext(r.Context()).Model(&User{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			writeError(w, 500, 50001, "cannot update user", requestID(r))
+			return
+		}
+	}
+	s.audit(r.Context(), nil, &p.UserID, "user.update", "user", id.String(), requestID(r), updates)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Service) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -1399,7 +1694,7 @@ func (s *Service) mayAccessAccount(p principal, accountID uuid.UUID) bool {
 	return p.AccountID != nil && *p.AccountID == accountID
 }
 func canManagePayments(p principal) bool {
-	return p.Role == "user" && p.AccountID != nil
+	return (p.Role == "user" || p.Role == "platform_admin") && p.AccountID != nil
 }
 func isUniqueViolation(err error) bool {
 	if err == nil {

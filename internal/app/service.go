@@ -103,7 +103,7 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 		if err := tx.Create(&Account{ID: accountID, Name: "演示账户", MerchantNo: "1000", APISecretCiphertext: apiSecret, CallbackSecretCiphertext: callbackSecret}).Error; err != nil {
 			return err
 		}
-		return tx.Create(&User{ID: uuid.New(), AccountID: &accountID, Email: "admin@tsumugi.local", PasswordHash: string(passwordHash), DisplayName: "演示用户", Role: "user", IsActive: true}).Error
+		return tx.Create(&User{ID: uuid.New(), AccountID: &accountID, Email: "admin@tsumugi.local", PasswordHash: string(passwordHash), DisplayName: "演示用户", Role: "platform_admin", IsActive: true}).Error
 	})
 }
 
@@ -117,6 +117,8 @@ func (s *Service) Routes() http.Handler {
 	mux.HandleFunc("GET /api.php", s.legacyAPI)
 	mux.HandleFunc("POST /api.php", s.legacyAPI)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
+	mux.HandleFunc("POST /api/v1/auth/register", s.register)
+	mux.HandleFunc("GET /api/v1/site-config", s.getPublicSiteConfig)
 	mux.HandleFunc("GET /api/v1/setup/status", s.setupStatus)
 	mux.HandleFunc("POST /api/v1/setup/initialize", s.setupInitialize)
 	mux.HandleFunc("POST /api/v1/webhooks/alipay/{token}", s.alipayWebhook)
@@ -183,6 +185,11 @@ func (s *Service) auth(next http.Handler) http.Handler {
 				return
 			}
 			accountID = &parsed
+		}
+		var user User
+		if err := s.db.DB().WithContext(r.Context()).Select("id", "account_id", "role", "is_active").Take(&user, "id = ?", userID).Error; err != nil || !user.IsActive || user.Role != claims.Role || (user.AccountID == nil) != (accountID == nil) || (user.AccountID != nil && *user.AccountID != *accountID) {
+			writeError(w, http.StatusUnauthorized, 40102, "invalid or inactive access token", requestID(r))
+			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, principal{UserID: userID, AccountID: accountID, Role: claims.Role, Email: claims.Email})))
 	})
