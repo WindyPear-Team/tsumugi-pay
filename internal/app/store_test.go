@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestSQLiteSchemaAndBootstrap(t *testing.T) {
@@ -38,7 +40,7 @@ func TestSQLiteSchemaAndBootstrap(t *testing.T) {
 	if err := store.DB().Model(&PaymentChannel{}).Count(&channels).Error; err != nil {
 		t.Fatalf("count channels: %v", err)
 	}
-	if users != 2 || channels != 0 {
+	if users != 1 || channels != 0 {
 		t.Fatalf("unexpected demo data: users=%d channels=%d", users, channels)
 	}
 }
@@ -62,6 +64,46 @@ func TestMigrateRenamesLegacyAccountColumns(t *testing.T) {
 	migrator := database.Migrator()
 	if !migrator.HasTable("accounts") || migrator.HasTable("tenants") || !migrator.HasColumn("bills", "account_id") {
 		t.Fatal("legacy account schema was not renamed")
+	}
+}
+
+func TestMultipleChannelsUsePriorityDispatch(t *testing.T) {
+	database, err := OpenDatabase("sqlite", "file:tsumugi_dispatch_test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	store := NewStore(database)
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate sqlite: %v", err)
+	}
+	if err := store.DB().Exec(`CREATE UNIQUE INDEX idx_account_provider ON payment_channels(account_id, provider)`).Error; err != nil {
+		t.Fatalf("create legacy single-channel index: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate channel dispatch: %v", err)
+	}
+	accountID := uuid.New()
+	if err := store.DB().Create(&Account{ID: accountID, Name: "Dispatch User", MerchantNo: "dispatch-user", APISecretCiphertext: "api", CallbackSecretCiphertext: "callback"}).Error; err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	channels := []PaymentChannel{
+		{ID: uuid.New(), AccountID: accountID, Provider: "alipay", DisplayName: "备用", Priority: 100, Weight: 100, Enabled: true, WebhookToken: "dispatch-backup"},
+		{ID: uuid.New(), AccountID: accountID, Provider: "alipay", DisplayName: "主用", Priority: 10, Weight: 100, Enabled: true, WebhookToken: "dispatch-primary"},
+	}
+	if err := store.DB().Create(&channels).Error; err != nil {
+		t.Fatalf("create duplicate-provider channels: %v", err)
+	}
+	service, err := New(Config{Database: store, JWTSecret: "test-secret", EncryptionKey: make([]byte, 32), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	selected, err := service.selectChannel(ctx, accountID, "alipay")
+	if err != nil {
+		t.Fatalf("select channel: %v", err)
+	}
+	if selected.ID != channels[1].ID {
+		t.Fatalf("selected priority %d channel, want priority %d", selected.Priority, channels[1].Priority)
 	}
 }
 

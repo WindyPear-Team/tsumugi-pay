@@ -6,8 +6,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// These models deliberately mirror the existing schema so AutoMigrate can be
-// introduced without a destructive data migration.
+// Account is a single user's merchant account. It is not a tenant and may not
+// have multiple user memberships.
 type Account struct {
 	ID                       uuid.UUID `gorm:"type:char(36);primaryKey"`
 	Name                     string    `gorm:"size:120;not null"`
@@ -19,9 +19,10 @@ type Account struct {
 	UpdatedAt                time.Time
 }
 
+// User is the sole login owner of an account and its payment channels.
 type User struct {
 	ID           uuid.UUID  `gorm:"type:char(36);primaryKey"`
-	AccountID    *uuid.UUID `gorm:"type:char(36);index"`
+	AccountID    *uuid.UUID `gorm:"type:char(36);uniqueIndex"`
 	Account      *Account   `gorm:"constraint:OnDelete:CASCADE"`
 	Email        string     `gorm:"size:255;uniqueIndex;not null"`
 	PasswordHash string     `gorm:"type:text;not null"`
@@ -34,14 +35,16 @@ type User struct {
 
 type PaymentChannel struct {
 	ID               uuid.UUID `gorm:"type:char(36);primaryKey"`
-	AccountID        uuid.UUID `gorm:"type:char(36);not null;uniqueIndex:idx_account_provider"`
+	AccountID        uuid.UUID `gorm:"type:char(36);not null;index:idx_channels_account_provider,priority:1"`
 	Account          Account   `gorm:"constraint:OnDelete:CASCADE"`
-	Provider         string    `gorm:"size:16;not null;uniqueIndex:idx_account_provider"`
+	Provider         string    `gorm:"size:16;not null;index:idx_channels_account_provider,priority:2"`
 	DisplayName      string    `gorm:"size:120;not null"`
-	Enabled          bool      `gorm:"not null;default:false"`
+	Priority         int       `gorm:"not null;default:100;index:idx_channels_dispatch,priority:3"`
+	Weight           int       `gorm:"not null;default:100"`
+	Enabled          bool      `gorm:"not null;default:false;index:idx_channels_dispatch,priority:2"`
 	ConfigCiphertext string    `gorm:"type:text;not null;default:''"`
 	WebhookToken     string    `gorm:"size:80;uniqueIndex;not null"`
-	CreatedAt        time.Time
+	CreatedAt        time.Time `gorm:"index:idx_channels_dispatch,priority:4"`
 	UpdatedAt        time.Time
 }
 
@@ -87,7 +90,6 @@ type Refund struct {
 	CreatedAt        time.Time `gorm:"index:idx_refunds_bill_created,priority:2"`
 	UpdatedAt        time.Time
 }
-
 type WebhookEvent struct {
 	ID          uuid.UUID `gorm:"type:char(36);primaryKey"`
 	AccountID   uuid.UUID `gorm:"type:char(36);not null"`
@@ -101,7 +103,6 @@ type WebhookEvent struct {
 	ProcessedAt *time.Time
 	CreatedAt   time.Time `gorm:"index:idx_webhook_events_channel_created,priority:2"`
 }
-
 type AuditLog struct {
 	ID          uuid.UUID  `gorm:"type:char(36);primaryKey"`
 	AccountID   *uuid.UUID `gorm:"type:char(36);index:idx_audit_logs_account_created,priority:1"`
@@ -115,13 +116,11 @@ type AuditLog struct {
 	Detail      string     `gorm:"type:text;not null;default:{}"`
 	CreatedAt   time.Time  `gorm:"index:idx_audit_logs_account_created,priority:2"`
 }
-
 type SystemSetting struct {
 	SettingKey   string `gorm:"size:80;primaryKey"`
 	SettingValue string `gorm:"type:text;not null"`
 	CreatedAt    time.Time
 }
-
 type AccountSetting struct {
 	AccountID                uuid.UUID `gorm:"type:char(36);primaryKey"`
 	Account                  Account   `gorm:"constraint:OnDelete:CASCADE"`

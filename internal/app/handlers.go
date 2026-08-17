@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/md5"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -178,8 +180,7 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 	if err := verifyOPSSignature(input, account.APISecret); err != nil {
 		return paymentResponse{}, clientError{40001, "invalid signature"}
 	}
-	var channelModel PaymentChannel
-	err = s.db.DB().WithContext(ctx).Where("account_id = ? AND provider = ?", account.ID, input.PaymentMethod).Take(&channelModel).Error
+	channelModel, err := s.selectChannel(ctx, account.ID, input.PaymentMethod)
 	if err != nil {
 		return paymentResponse{}, err
 	}
@@ -238,6 +239,48 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 	response.Data.QRCode = result.QRCode
 	response.Data.ExpiresAt = bill.ExpiresAt
 	return response, nil
+}
+
+// selectChannel selects among the best-priority enabled channels. Channels at
+// the same priority are distributed according to their positive weight.
+func (s *Service) selectChannel(ctx context.Context, accountID uuid.UUID, provider string) (PaymentChannel, error) {
+	var candidates []PaymentChannel
+	if err := s.db.DB().WithContext(ctx).Where("account_id = ? AND provider = ? AND enabled = ?", accountID, provider, true).Order("priority ASC, created_at ASC").Find(&candidates).Error; err != nil {
+		return PaymentChannel{}, err
+	}
+	if len(candidates) == 0 {
+		return PaymentChannel{}, gorm.ErrRecordNotFound
+	}
+	priority := candidates[0].Priority
+	total := 0
+	for _, channel := range candidates {
+		if channel.Priority != priority {
+			break
+		}
+		if channel.Weight > 0 {
+			total += channel.Weight
+		}
+	}
+	if total == 0 {
+		return PaymentChannel{}, errors.New("no enabled payment channel has a positive weight")
+	}
+	pick, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(total)))
+	if err != nil {
+		return PaymentChannel{}, err
+	}
+	remaining := int(pick.Int64())
+	for _, channel := range candidates {
+		if channel.Priority != priority {
+			break
+		}
+		if channel.Weight > 0 {
+			remaining -= channel.Weight
+			if remaining < 0 {
+				return channel, nil
+			}
+		}
+	}
+	return PaymentChannel{}, errors.New("payment channel selection failed")
 }
 
 func (s *Service) legacyAPI(w http.ResponseWriter, r *http.Request) {
@@ -388,16 +431,6 @@ func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
 		s.adminMe(w, r)
 	case r.Method == "GET" && path == "/dashboard":
 		s.dashboard(w, r)
-	case path == "/accounts":
-		if r.Method == "GET" {
-			s.listAccounts(w, r)
-		} else if r.Method == "POST" {
-			s.createAccount(w, r)
-		} else {
-			methodNotAllowed(w, r)
-		}
-	case strings.HasPrefix(path, "/accounts/") && r.Method == "PATCH":
-		s.patchAccount(w, r, strings.TrimPrefix(path, "/accounts/"))
 	case path == "/channels":
 		if r.Method == "GET" {
 			s.listChannels(w, r)
@@ -523,7 +556,7 @@ func (s *Service) patchSiteSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) siteSettingsAccount(w http.ResponseWriter, r *http.Request) (*uuid.UUID, bool) {
 	p := currentPrincipal(r)
-	if p.Role != "user" && p.Role != "account_admin" && p.Role != "platform_admin" {
+	if p.Role != "user" {
 		writeError(w, http.StatusForbidden, 40301, "user account required", requestID(r))
 		return nil, false
 	}
@@ -602,19 +635,11 @@ func (s *Service) dashboard(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Service) scopedAccount(w http.ResponseWriter, r *http.Request) (*uuid.UUID, bool) {
 	p := currentPrincipal(r)
-	if p.Role != "platform_admin" {
-		return p.AccountID, true
-	}
-	raw := r.Header.Get("X-Account-ID")
-	if raw == "" {
-		return nil, true
-	}
-	id, err := uuid.Parse(raw)
-	if err != nil {
-		writeError(w, 400, 40002, "invalid X-Account-ID", requestID(r))
+	if p.AccountID == nil {
+		writeError(w, 403, 40301, "a user account is required", requestID(r))
 		return nil, false
 	}
-	return &id, true
+	return p.AccountID, true
 }
 
 func (s *Service) listAccounts(w http.ResponseWriter, r *http.Request) {
@@ -735,7 +760,7 @@ func (s *Service) listChannels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if accountID == nil {
-		writeError(w, 400, 40002, "select a account through X-Account-ID", requestID(r))
+		writeError(w, 400, 40002, "a user account is required", requestID(r))
 		return
 	}
 	var channels []PaymentChannel
@@ -745,7 +770,7 @@ func (s *Service) listChannels(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]map[string]any, 0)
 	for _, channel := range channels {
-		items = append(items, map[string]any{"id": channel.ID, "provider": channel.Provider, "display_name": channel.DisplayName, "enabled": channel.Enabled, "configured": channel.ConfigCiphertext != "", "webhook_url": fmt.Sprintf("%s/api/v1/webhooks/%s/%s", s.baseURL, channel.Provider, channel.WebhookToken), "updated_at": channel.UpdatedAt})
+		items = append(items, map[string]any{"id": channel.ID, "provider": channel.Provider, "display_name": channel.DisplayName, "priority": channel.Priority, "weight": channel.Weight, "enabled": channel.Enabled, "configured": channel.ConfigCiphertext != "", "webhook_url": fmt.Sprintf("%s/api/v1/webhooks/%s/%s", s.baseURL, channel.Provider, channel.WebhookToken), "updated_at": channel.UpdatedAt})
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
@@ -758,13 +783,15 @@ func (s *Service) createChannel(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := s.scopedAccount(w, r)
 	if !ok || accountID == nil {
 		if ok {
-			writeError(w, http.StatusBadRequest, 40002, "select a account through X-Account-ID", requestID(r))
+			writeError(w, http.StatusBadRequest, 40002, "a user account is required", requestID(r))
 		}
 		return
 	}
 	var input struct {
 		Provider    string `json:"provider"`
 		DisplayName string `json:"display_name"`
+		Priority    int    `json:"priority"`
+		Weight      int    `json:"weight"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -778,18 +805,24 @@ func (s *Service) createChannel(w http.ResponseWriter, r *http.Request) {
 	if input.DisplayName == "" {
 		input.DisplayName = map[string]string{"alipay": "支付宝", "wechat": "微信支付"}[input.Provider]
 	}
+	if input.Priority == 0 {
+		input.Priority = 100
+	}
+	if input.Priority < 0 || input.Weight < 0 {
+		writeError(w, http.StatusBadRequest, 40002, "priority and weight must not be negative", requestID(r))
+		return
+	}
+	if input.Weight == 0 {
+		input.Weight = 100
+	}
 	channelID := uuid.New()
-	err := s.db.DB().WithContext(r.Context()).Create(&PaymentChannel{ID: channelID, AccountID: *accountID, Provider: input.Provider, DisplayName: input.DisplayName, WebhookToken: randomToken(24)}).Error
+	err := s.db.DB().WithContext(r.Context()).Create(&PaymentChannel{ID: channelID, AccountID: *accountID, Provider: input.Provider, DisplayName: input.DisplayName, Priority: input.Priority, Weight: input.Weight, WebhookToken: randomToken(24)}).Error
 	if err != nil {
-		if isUniqueViolation(err) {
-			writeError(w, http.StatusConflict, 40006, "this payment provider has already been added", requestID(r))
-			return
-		}
 		writeError(w, http.StatusInternalServerError, 50001, "cannot create payment channel", requestID(r))
 		return
 	}
 	s.audit(r.Context(), accountID, &p.UserID, "channel.create", "payment_channel", channelID.String(), requestID(r), map[string]string{"provider": input.Provider})
-	writeJSON(w, http.StatusCreated, map[string]any{"id": channelID, "provider": input.Provider, "display_name": input.DisplayName})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": channelID, "provider": input.Provider, "display_name": input.DisplayName, "priority": input.Priority, "weight": input.Weight})
 }
 func (s *Service) patchChannel(w http.ResponseWriter, r *http.Request, idText string) {
 	p := currentPrincipal(r)
@@ -804,6 +837,8 @@ func (s *Service) patchChannel(w http.ResponseWriter, r *http.Request, idText st
 	}
 	var input struct {
 		DisplayName *string         `json:"display_name"`
+		Priority    *int            `json:"priority"`
+		Weight      *int            `json:"weight"`
 		Enabled     *bool           `json:"enabled"`
 		Config      json.RawMessage `json:"config"`
 	}
@@ -823,6 +858,20 @@ func (s *Service) patchChannel(w http.ResponseWriter, r *http.Request, idText st
 	updates := map[string]any{}
 	if input.DisplayName != nil {
 		updates["display_name"] = *input.DisplayName
+	}
+	if input.Priority != nil {
+		if *input.Priority < 0 {
+			writeError(w, 400, 40002, "priority must not be negative", requestID(r))
+			return
+		}
+		updates["priority"] = *input.Priority
+	}
+	if input.Weight != nil {
+		if *input.Weight < 1 {
+			writeError(w, 400, 40002, "weight must be at least 1", requestID(r))
+			return
+		}
+		updates["weight"] = *input.Weight
 	}
 	if input.Config != nil {
 		var config providerConfig
@@ -1210,10 +1259,10 @@ func billPublic(b billRecord) map[string]any {
 	return map[string]any{"id": b.ID, "platform_order_no": b.PlatformOrderNo, "merchant_order_no": b.MerchantOrderNo, "subject": b.Subject, "description": b.Description, "amount": moneyString(b.AmountMinor), "currency": b.Currency, "provider": b.Provider, "scene": b.Scene, "status": b.Status, "provider_transaction_id": b.ProviderTransactionID, "notify_url": b.NotifyURL, "return_url": b.ReturnURL, "metadata": b.Metadata, "expires_at": b.ExpiresAt, "paid_at": b.PaidAt, "closed_at": b.ClosedAt, "created_at": b.CreatedAt, "updated_at": b.UpdatedAt}
 }
 func (s *Service) mayAccessAccount(p principal, accountID uuid.UUID) bool {
-	return p.Role == "platform_admin" || (p.AccountID != nil && *p.AccountID == accountID)
+	return p.AccountID != nil && *p.AccountID == accountID
 }
 func canManagePayments(p principal) bool {
-	return p.Role == "user" || p.Role == "platform_admin" || p.Role == "account_admin" || p.Role == "account_operator"
+	return p.Role == "user" && p.AccountID != nil
 }
 func isUniqueViolation(err error) bool {
 	if err == nil {

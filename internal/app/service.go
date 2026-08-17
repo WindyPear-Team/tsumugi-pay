@@ -100,13 +100,10 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	}
 	accountID := uuid.New()
 	return s.db.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&Account{ID: accountID, Name: "演示租户", MerchantNo: "100000", APISecretCiphertext: apiSecret, CallbackSecretCiphertext: callbackSecret}).Error; err != nil {
+		if err := tx.Create(&Account{ID: accountID, Name: "演示账户", MerchantNo: "100000", APISecretCiphertext: apiSecret, CallbackSecretCiphertext: callbackSecret}).Error; err != nil {
 			return err
 		}
-		if err := tx.Create(&User{ID: uuid.New(), Email: "admin@tsumugi.local", PasswordHash: string(passwordHash), DisplayName: "平台管理员", Role: "platform_admin", IsActive: true}).Error; err != nil {
-			return err
-		}
-		return tx.Create(&User{ID: uuid.New(), AccountID: &accountID, Email: "merchant@tsumugi.local", PasswordHash: string(passwordHash), DisplayName: "演示用户", Role: "user", IsActive: true}).Error
+		return tx.Create(&User{ID: uuid.New(), AccountID: &accountID, Email: "admin@tsumugi.local", PasswordHash: string(passwordHash), DisplayName: "演示用户", Role: "user", IsActive: true}).Error
 	})
 }
 
@@ -133,7 +130,7 @@ func (s *Service) middleware(next http.Handler) http.Handler {
 		requestID := "req_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20]
 		w.Header().Set("X-Request-ID", requestID)
 		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Account-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

@@ -17,11 +17,36 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.migrateLegacyAccountNames(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateChannelDispatch(ctx); err != nil {
+		return err
+	}
 	if err := s.db.WithContext(ctx).AutoMigrate(
 		&Account{}, &User{}, &PaymentChannel{}, &Bill{}, &Refund{},
 		&WebhookEvent{}, &AuditLog{}, &SystemSetting{}, &AccountSetting{},
 	); err != nil {
 		return fmt.Errorf("auto migrate schema: %w", err)
+	}
+	return nil
+}
+
+// Earlier releases enforced a single channel for each provider. Removing that
+// uniqueness is required before AutoMigrate can add priority and weight.
+func (s *Store) migrateChannelDispatch(ctx context.Context) error {
+	migrator := s.db.WithContext(ctx).Migrator()
+	if !migrator.HasTable(&PaymentChannel{}) {
+		return nil
+	}
+	for _, name := range []string{"idx_account_provider", "payment_channels_account_id_provider_key", "payment_channels_account_id_provider_unique"} {
+		if migrator.HasConstraint(&PaymentChannel{}, name) {
+			if err := migrator.DropConstraint(&PaymentChannel{}, name); err != nil {
+				return fmt.Errorf("remove legacy payment channel constraint %s: %w", name, err)
+			}
+		}
+		if migrator.HasIndex(&PaymentChannel{}, name) {
+			if err := migrator.DropIndex(&PaymentChannel{}, name); err != nil {
+				return fmt.Errorf("remove legacy payment channel index %s: %w", name, err)
+			}
+		}
 	}
 	return nil
 }
