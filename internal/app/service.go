@@ -103,7 +103,7 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 		if err := tx.Create(&Account{ID: accountID, Name: "演示账户", MerchantNo: "1000", APISecretCiphertext: apiSecret, CallbackSecretCiphertext: callbackSecret}).Error; err != nil {
 			return err
 		}
-		return tx.Create(&User{ID: uuid.New(), AccountID: &accountID, Email: "admin@tsumugi.local", PasswordHash: string(passwordHash), DisplayName: "演示用户", Role: "platform_admin", IsActive: true}).Error
+		return tx.Create(&User{ID: uuid.New(), AccountID: &accountID, Email: "admin@tsumugi.local", Username: "admin", PasswordHash: string(passwordHash), DisplayName: "演示用户", Role: "platform_admin", IsActive: true}).Error
 	})
 }
 
@@ -118,6 +118,8 @@ func (s *Service) Routes() http.Handler {
 	mux.HandleFunc("POST /api.php", s.legacyAPI)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/auth/register", s.register)
+	mux.HandleFunc("GET /api/v1/auth/oidc/login", s.oidcLogin)
+	mux.HandleFunc("GET /api/v1/auth/oidc/callback", s.oidcCallback)
 	mux.HandleFunc("GET /api/v1/site-config", s.getPublicSiteConfig)
 	mux.HandleFunc("GET /api/v1/setup/status", s.setupStatus)
 	mux.HandleFunc("POST /api/v1/setup/initialize", s.setupInitialize)

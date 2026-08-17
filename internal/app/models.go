@@ -25,6 +25,8 @@ type User struct {
 	AccountID    *uuid.UUID `gorm:"type:char(36);uniqueIndex"`
 	Account      *Account   `gorm:"constraint:OnDelete:CASCADE"`
 	Email        string     `gorm:"size:255;unique;not null"`
+	Username     string     `gorm:"size:64;uniqueIndex"`
+	OIDCSubject  *string    `gorm:"size:512;uniqueIndex"`
 	PasswordHash string     `gorm:"type:text;not null"`
 	DisplayName  string     `gorm:"size:120;not null"`
 	Role         string     `gorm:"size:32;not null"`

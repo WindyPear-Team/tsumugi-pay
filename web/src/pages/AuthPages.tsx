@@ -7,26 +7,308 @@ import { API } from "@/lib/api"
 import type { PublicSiteConfig } from "@/types"
 
 export function LoginPage({ initialEmail = "", site, onSuccess }: { initialEmail?: string; site?: PublicSiteConfig | null; onSuccess: (token: string) => void }) {
-  const [email, setEmail] = useState(initialEmail || "admin@tsumugi.local"); const [password, setPassword] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false)
-  async function submit(event: FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { const response = await fetch(`${API}/api/v1/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) }); const body = await response.json(); if (!response.ok) throw new Error(body.message || "登录失败"); onSuccess(body.access_token) } catch (err: any) { setError(err.message) } finally { setBusy(false) } }
+  const [email, setEmail] = useState(initialEmail || "admin@tsumugi.local")
+  const [password, setPassword] = useState("")
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError("")
+    try {
+      const response = await fetch(`${API}/api/v1/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: email, password }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.message || "登录失败")
+      onSuccess(body.access_token)
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
   const allowPasswordLogin = site?.allow_password_login !== false
-  return <AuthLayout siteName={site?.site_name} eyebrow="OPEN PAYMENT OPERATIONS" title={<>掌控每一笔<br/><em>可信交易。</em></>} copy="为独立支付账户而设计，连接支付宝与微信支付官方能力。">{allowPasswordLogin ? <><form onSubmit={submit}><Label>邮箱<Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></Label><Label>密码<Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required /></Label>{error && <p className="form-error">{error}</p>}<button className="primary-button full" disabled={busy}>{busy ? "正在验证…" : "进入支付运营中心"}</button></form>{site?.allow_password_registration && <RegisterForm/>}<PolicyLinks site={site}/></> : <div className="auth-disabled"><p>账号密码登录暂未开放。</p><PolicyLinks site={site}/></div>}</AuthLayout>
+  return (
+    <AuthLayout
+      siteName={site?.site_name}
+      eyebrow="OPEN PAYMENT OPERATIONS"
+      title={
+        <>
+          掌控每一笔
+          <br />
+          <em>可信交易。</em>
+        </>
+      }
+      copy="为独立支付账户而设计，连接支付宝与微信支付官方能力。"
+    >
+      {allowPasswordLogin && (
+        <form onSubmit={submit}>
+          <Label>
+            用户名或邮箱
+            <Input value={email} onChange={(event) => setEmail(event.target.value)} required />
+          </Label>
+          <Label>
+            密码
+            <Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required />
+          </Label>
+          {error && <p className="form-error">{error}</p>}
+          <button className="primary-button full" disabled={busy}>
+            {busy ? "正在验证…" : "进入支付运营中心"}
+          </button>
+        </form>
+      )}
+      {!allowPasswordLogin && <p className="auth-disabled">账号密码登录暂未开放。</p>}
+      {site?.oidc_enabled && (
+        <a className="secondary-button oidc-button" href={`${API}/api/v1/auth/oidc/login`}>
+          {site.oidc_login_label || "使用统一账号登录"}
+        </a>
+      )}
+      {site?.allow_password_registration && <RegisterForm />}
+      <PolicyLinks site={site} />
+    </AuthLayout>
+  )
 }
 
 function RegisterForm() {
-  const [open, setOpen] = useState(false); const [accountName, setAccountName] = useState(""); const [displayName, setDisplayName] = useState(""); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [message, setMessage] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false)
-  async function submit(event: FormEvent) { event.preventDefault(); setBusy(true); setError(""); setMessage(""); try { const response = await fetch(`${API}/api/v1/auth/register`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account_name: accountName, display_name: displayName, email, password }) }); const body = await response.json(); if (!response.ok) throw new Error(body.message || "注册失败"); setMessage(`账户创建完成，商户号 ${body.account.merchant_no}。请使用新账户登录。`); setOpen(false); setPassword("") } catch (err: any) { setError(err.message) } finally { setBusy(false) } }
-  if (!open) return <><button className="text-button" type="button" onClick={() => setOpen(true)}>注册新账户</button>{message && <p className="form-success">{message}</p>}</>
-  return <div className="register-form"><p className="eyebrow">CREATE ACCOUNT</p><form onSubmit={submit}><Label>账户名称<Input value={accountName} onChange={(event) => setAccountName(event.target.value)} required /></Label><Label>姓名<Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /></Label><Label>邮箱<Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></Label><Label>密码<Input type="password" minLength={10} value={password} onChange={(event) => setPassword(event.target.value)} required /></Label>{error && <p className="form-error">{error}</p>}<div className="form-actions"><button className="secondary-button" type="button" onClick={() => setOpen(false)}>取消</button><button className="primary-button" disabled={busy}>{busy ? "创建中…" : "创建账户"}</button></div></form></div>
+  const [open, setOpen] = useState(false)
+  const [accountName, setAccountName] = useState("")
+  const [displayName, setDisplayName] = useState("")
+  const [username, setUsername] = useState("")
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
+  const [message, setMessage] = useState("")
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError("")
+    setMessage("")
+    try {
+      const response = await fetch(`${API}/api/v1/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          account_name: accountName,
+          display_name: displayName,
+          username,
+          email,
+          password,
+        }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.message || "注册失败")
+      setMessage(`账户创建完成，商户号 ${body.account.merchant_no}。请使用新账户登录。`)
+      setOpen(false)
+      setPassword("")
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  if (!open)
+    return (
+      <>
+        <button className="text-button" type="button" onClick={() => setOpen(true)}>
+          注册新账户
+        </button>
+        {message && <p className="form-success">{message}</p>}
+      </>
+    )
+  return (
+    <div className="register-form">
+      <p className="eyebrow">CREATE ACCOUNT</p>
+      <form onSubmit={submit}>
+        <Label>
+          账户名称
+          <Input value={accountName} onChange={(event) => setAccountName(event.target.value)} required />
+        </Label>
+        <Label>
+          姓名
+          <Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} required />
+        </Label>
+        <Label>
+          用户名
+          <Input value={username} placeholder="letters, numbers, _ or -" onChange={(event) => setUsername(event.target.value)} required />
+        </Label>
+        <Label>
+          邮箱
+          <Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
+        </Label>
+        <Label>
+          密码
+          <Input type="password" minLength={10} value={password} onChange={(event) => setPassword(event.target.value)} required />
+        </Label>
+        {error && <p className="form-error">{error}</p>}
+        <div className="form-actions">
+          <button className="secondary-button" type="button" onClick={() => setOpen(false)}>
+            取消
+          </button>
+          <button className="primary-button" disabled={busy}>
+            {busy ? "创建中…" : "创建账户"}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
 }
 
-function PolicyLinks({ site }: { site?: PublicSiteConfig | null }) { if (!site?.terms_url && !site?.privacy_policy_url) return null; return <p className="policy-links">{site.terms_url && <a href={site.terms_url} target="_blank" rel="noreferrer">用户协议</a>}{site.terms_url && site.privacy_policy_url && <span> · </span>}{site.privacy_policy_url && <a href={site.privacy_policy_url} target="_blank" rel="noreferrer">隐私政策</a>}</p> }
+function PolicyLinks({ site }: { site?: PublicSiteConfig | null }) {
+  if (!site?.terms_url && !site?.privacy_policy_url) return null
+  return (
+    <p className="policy-links">
+      {site.terms_url && (
+        <a href={site.terms_url} target="_blank" rel="noreferrer">
+          用户协议
+        </a>
+      )}
+      {site.terms_url && site.privacy_policy_url && <span> · </span>}
+      {site.privacy_policy_url && (
+        <a href={site.privacy_policy_url} target="_blank" rel="noreferrer">
+          隐私政策
+        </a>
+      )}
+    </p>
+  )
+}
 
 export function SetupPage({ onCompleted }: { onCompleted: (email: string) => void }) {
-  const [accountName, setAccountName] = useState(""); const [merchantNo, setMerchantNo] = useState(""); const [displayName, setDisplayName] = useState(""); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [confirmPassword, setConfirmPassword] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false); const [created, setCreated] = useState<{ merchantNo: string; apiSecret: string; callbackSecret: string } | null>(null)
-  async function submit(event: FormEvent) { event.preventDefault(); if (password !== confirmPassword) return setError("两次输入的密码不一致"); setBusy(true); setError(""); try { const response = await fetch(`${API}/api/v1/setup/initialize`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account_name: accountName, merchant_no: merchantNo, display_name: displayName, email, password }) }); const body = await response.json(); if (!response.ok) throw new Error(body.message || "初始化失败"); setCreated({ merchantNo: body.account.merchant_no, apiSecret: body.credentials.api_secret, callbackSecret: body.credentials.callback_secret }) } catch (err: any) { setError(err.message) } finally { setBusy(false) } }
-  if (created) return <AuthLayout eyebrow="ACCOUNT CREATED" title={<>用户已创建。</>} copy="请立即安全保存以下凭据，它们不会再次显示。"><div className="credential-box"><Detail label="商户号" value={created.merchantNo}/><Detail label="API 请求密钥" value={created.apiSecret}/><Detail label="回调签名密钥" value={created.callbackSecret}/></div><button className="primary-button full" onClick={() => onCompleted(email)}>我已保存，前往登录</button></AuthLayout>
-  return <AuthLayout eyebrow="FIRST-RUN SETUP" title={<>创建你的<br/><em>用户。</em></>} copy="每位用户拥有独立支付空间，可自行添加官方支付通道。"><form onSubmit={submit}><Label>用户名称<Input value={accountName} onChange={(event) => setAccountName(event.target.value)} required /></Label><Label>商户号（留空使用 1000）<Input inputMode="numeric" placeholder="1000" value={merchantNo} onChange={(event) => setMerchantNo(event.target.value)} /></Label><Label>姓名<Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /></Label><Label>邮箱<Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></Label><Label>设置密码<Input type="password" minLength={10} value={password} onChange={(event) => setPassword(event.target.value)} required /></Label><Label>确认密码<Input type="password" minLength={10} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></Label>{error && <p className="form-error">{error}</p>}<button className="primary-button full" disabled={busy}>{busy ? "创建中…" : "创建用户并继续"}</button></form></AuthLayout>
+  const [accountName, setAccountName] = useState("")
+  const [merchantNo, setMerchantNo] = useState("")
+  const [displayName, setDisplayName] = useState("")
+  const [username, setUsername] = useState("")
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [created, setCreated] = useState<{
+    merchantNo: string
+    apiSecret: string
+    callbackSecret: string
+  } | null>(null)
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (password !== confirmPassword) return setError("两次输入的密码不一致")
+    setBusy(true)
+    setError("")
+    try {
+      const response = await fetch(`${API}/api/v1/setup/initialize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          account_name: accountName,
+          merchant_no: merchantNo,
+          display_name: displayName,
+          username,
+          email,
+          password,
+        }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.message || "初始化失败")
+      setCreated({
+        merchantNo: body.account.merchant_no,
+        apiSecret: body.credentials.api_secret,
+        callbackSecret: body.credentials.callback_secret,
+      })
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  if (created)
+    return (
+      <AuthLayout eyebrow="ACCOUNT CREATED" title={<>用户已创建。</>} copy="请立即安全保存以下凭据，它们不会再次显示。">
+        <div className="credential-box">
+          <Detail label="商户号" value={created.merchantNo} />
+          <Detail label="API 请求密钥" value={created.apiSecret} />
+          <Detail label="回调签名密钥" value={created.callbackSecret} />
+        </div>
+        <button className="primary-button full" onClick={() => onCompleted(email)}>
+          我已保存，前往登录
+        </button>
+      </AuthLayout>
+    )
+  return (
+    <AuthLayout
+      eyebrow="FIRST-RUN SETUP"
+      title={
+        <>
+          创建你的
+          <br />
+          <em>用户。</em>
+        </>
+      }
+      copy="每位用户拥有独立支付空间，可自行添加官方支付通道。"
+    >
+      <form onSubmit={submit}>
+        <Label>
+          用户名称
+          <Input value={accountName} onChange={(event) => setAccountName(event.target.value)} required />
+        </Label>
+        <Label>
+          商户号（留空使用 1000）
+          <Input inputMode="numeric" placeholder="1000" value={merchantNo} onChange={(event) => setMerchantNo(event.target.value)} />
+        </Label>
+        <Label>
+          姓名
+          <Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} required />
+        </Label>
+        <Label>
+          用户名
+          <Input value={username} placeholder="letters, numbers, _ or -" onChange={(event) => setUsername(event.target.value)} required />
+        </Label>
+        <Label>
+          邮箱
+          <Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
+        </Label>
+        <Label>
+          设置密码
+          <Input type="password" minLength={10} value={password} onChange={(event) => setPassword(event.target.value)} required />
+        </Label>
+        <Label>
+          确认密码
+          <Input type="password" minLength={10} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required />
+        </Label>
+        {error && <p className="form-error">{error}</p>}
+        <button className="primary-button full" disabled={busy}>
+          {busy ? "创建中…" : "创建用户并继续"}
+        </button>
+      </form>
+    </AuthLayout>
+  )
 }
 
-function AuthLayout({ siteName = "Tsumugi Pay", eyebrow, title, copy, children }: { siteName?: string; eyebrow: string; title: React.ReactNode; copy: string; children: React.ReactNode }) { return <div className="login-page"><div className="login-panel"><div className="brand login-brand"><span className="brand-mark">T</span><span>{siteName}</span></div><div className="login-copy"><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{copy}</p></div>{children}</div><div className="login-art"><div className="orb orb-one"/><div className="orb orb-two"/><p>让每一笔支付，<br/>清晰且可信。</p></div></div> }
+function AuthLayout({ siteName = "Tsumugi Pay", eyebrow, title, copy, children }: { siteName?: string; eyebrow: string; title: React.ReactNode; copy: string; children: React.ReactNode }) {
+  return (
+    <div className="login-page">
+      <div className="login-panel">
+        <div className="brand login-brand">
+          <span className="brand-mark">T</span>
+          <span>{siteName}</span>
+        </div>
+        <div className="login-copy">
+          <p className="eyebrow">{eyebrow}</p>
+          <h1>{title}</h1>
+          <p>{copy}</p>
+        </div>
+        {children}
+      </div>
+      <div className="login-art">
+        <div className="orb orb-one" />
+        <div className="orb orb-two" />
+        <p>
+          让每一笔支付，
+          <br />
+          清晰且可信。
+        </p>
+      </div>
+    </div>
+  )
+}

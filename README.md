@@ -67,24 +67,26 @@ yarn dev
 
 | 方法 | 端点 | 用途 |
 | --- | --- | --- |
-| `POST` | `/api/v1/auth/login` | 后台用户登录。 |
-| `POST` | `/api/v1/auth/register` | 开启密码注册且邮箱命中白名单时，创建独立用户账户。 |
-| `GET` | `/api/v1/site-config` | 获取公开的站点名称、登录注册开关与协议链接。 |
+| `POST` | `/api/v1/auth/login` | 使用用户名或邮箱进行密码登录。 |
+| `POST` | `/api/v1/auth/register` | 开启密码注册且邮箱后缀命中白名单时，创建独立用户账户。 |
+| `GET` | `/api/v1/auth/oidc/login` | 发起 OIDC 登录；首次成功登录会创建独立账户，不受密码注册开关影响。 |
+| `GET` | `/api/v1/site-config` | 获取公开的站点名称、图标、主题色、登录方式与协议链接。 |
 | `GET` | `/api/v1/setup/status` | 查询是否需要首次初始化。仅暴露是否需要初始化。 |
 | `POST` | `/api/v1/setup/initialize` | 系统无用户时创建首位用户及其支付工作区；一次性入口。 |
 | `GET` | `/api/v1/admin/me` | 当前会话身份与角色。 |
 | `GET` / `POST` | `/api/v1/admin/users` | 平台管理员查询或创建用户；新用户拥有独立账户和自动递增的数字商户号。 |
-| `PATCH` | `/api/v1/admin/users/:id` | 平台管理员启用、停用或更名用户。 |
+| `PATCH` | `/api/v1/admin/users/:id` | 平台管理员启用、停用、修改用户名、姓名或密码。 |
+| `PATCH` | `/api/v1/admin/me` | 当前用户修改自己的用户名、姓名或密码。 |
 | `GET` | `/api/v1/admin/dashboard` | 账单与成功金额汇总。 |
 | `GET` / `POST` | `/api/v1/admin/channels` | 查询或添加自己的支付宝、微信支付通道；同一服务商可添加多个。 |
-| `PATCH` | `/api/v1/admin/channels/:id` | 保存官方凭据、修改名称、优先级、权重及启停状态。 |
+| `PATCH` / `DELETE` | `/api/v1/admin/channels/:id` | 保存官方凭据、修改名称、优先级、权重及启停状态，或删除无账单关联的通道。 |
 | `GET` | `/api/v1/admin/bills` | 账单查询，支持 `?status=` 筛选。 |
 | `GET` | `/api/v1/admin/bills/:id` | 单笔账单详情。 |
 | `POST` | `/api/v1/admin/bills/:id/close` | 关闭待支付账单。 |
 | `POST` | `/api/v1/admin/bills/:id/refunds` | 使用退款单号发起退款。 |
 | `GET` | `/api/v1/admin/refunds` | 退款列表。 |
 | `GET` | `/api/v1/admin/audit-logs` | 管理和资金操作审计记录。 |
-| `GET` / `PATCH` | `/api/v1/admin/site-settings` | 仅平台管理员可管理站点名称、密码登录/注册、邮箱白名单、协议链接及 SMTP、hCaptcha、OIDC 配置；敏感密钥不会回显。 |
+| `GET` / `PATCH` | `/api/v1/admin/site-settings` | 仅平台管理员可管理站点名称、图标、主题色、密码登录/注册、每行一个的邮箱后缀白名单、协议链接及 SMTP、hCaptcha、OIDC 配置；敏感密钥不会回显。 |
 
 ## OPS 与易支付兼容端点
 

@@ -19,9 +19,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/oauth2"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -69,6 +71,7 @@ type oidcSiteConfig struct {
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
 	TokenEndpoint         string `json:"token_endpoint"`
 	JWKSURI               string `json:"jwks_uri"`
+	LoginLabel            string `json:"login_label"`
 }
 type accountSiteSettings struct {
 	Email    smtpSiteConfig
@@ -82,6 +85,8 @@ type siteConfig struct {
 	EmailWhitelist            []string `json:"email_whitelist"`
 	TermsURL                  string   `json:"terms_url"`
 	PrivacyPolicyURL          string   `json:"privacy_policy_url"`
+	FaviconURL                string   `json:"favicon_url"`
+	ThemeColor                string   `json:"theme_color"`
 }
 type paymentInput struct {
 	MerchantID      string `json:"merchant_id"`
@@ -343,19 +348,24 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Identifier string `json:"identifier"`
+		Email      string `json:"email"`
+		Password   string `json:"password"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
 	}
+	identifier := strings.ToLower(strings.TrimSpace(input.Identifier))
+	if identifier == "" {
+		identifier = strings.ToLower(strings.TrimSpace(input.Email))
+	}
 	var user User
-	err = s.db.DB().WithContext(r.Context()).Where("email = ?", strings.ToLower(strings.TrimSpace(input.Email))).Take(&user).Error
+	err = s.db.DB().WithContext(r.Context()).Where("email = ? OR username = ?", identifier, identifier).Take(&user).Error
 	if err != nil || !user.IsActive || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)) != nil {
-		writeError(w, 401, 40103, "invalid email or password", requestID(r))
+		writeError(w, 401, 40103, "invalid username or password", requestID(r))
 		return
 	}
-	claims := jwtClaims{Role: user.Role, Email: strings.ToLower(strings.TrimSpace(input.Email)), RegisteredClaims: jwt.RegisteredClaims{Subject: user.ID.String(), ExpiresAt: jwt.NewNumericDate(time.Now().Add(8 * time.Hour)), IssuedAt: jwt.NewNumericDate(time.Now())}}
+	claims := jwtClaims{Role: user.Role, Email: user.Email, RegisteredClaims: jwt.RegisteredClaims{Subject: user.ID.String(), ExpiresAt: jwt.NewNumericDate(time.Now().Add(8 * time.Hour)), IssuedAt: jwt.NewNumericDate(time.Now())}}
 	if user.AccountID != nil {
 		claims.AccountID = user.AccountID.String()
 	}
@@ -365,7 +375,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, 50001, "cannot issue access token", requestID(r))
 		return
 	}
-	writeJSON(w, 200, map[string]any{"access_token": signed, "token_type": "Bearer", "expires_in": 28800, "user": map[string]any{"id": user.ID, "email": claims.Email, "display_name": user.DisplayName, "role": user.Role, "account_id": user.AccountID}})
+	writeJSON(w, 200, map[string]any{"access_token": signed, "token_type": "Bearer", "expires_in": 28800, "user": map[string]any{"id": user.ID, "email": claims.Email, "username": user.Username, "display_name": user.DisplayName, "role": user.Role, "account_id": user.AccountID}})
 }
 
 // setupStatus is deliberately minimal: it only reveals whether an initial
@@ -385,7 +395,187 @@ func (s *Service) getPublicSiteConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, 50001, "cannot load site configuration", requestID(r))
 		return
 	}
-	writeJSON(w, http.StatusOK, config)
+	oidcConfig, err := s.loadPlatformOIDC(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot load OIDC configuration", requestID(r))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"site_name": config.SiteName, "allow_password_login": config.AllowPasswordLogin, "allow_password_registration": config.AllowPasswordRegistration, "email_whitelist": config.EmailWhitelist, "terms_url": config.TermsURL, "privacy_policy_url": config.PrivacyPolicyURL, "favicon_url": config.FaviconURL, "theme_color": config.ThemeColor, "oidc_enabled": oidcConfig.Enabled, "oidc_login_label": oidcConfig.LoginLabel})
+}
+
+func (s *Service) loadPlatformOIDC(ctx context.Context) (oidcSiteConfig, error) {
+	var admin User
+	err := s.db.DB().WithContext(ctx).Where("role = ? AND account_id IS NOT NULL", "platform_admin").Order("created_at ASC").Take(&admin).Error
+	if isNoRows(err) {
+		return oidcSiteConfig{}, nil
+	}
+	if err != nil {
+		return oidcSiteConfig{}, err
+	}
+	settings, _, err := s.loadAccountSettings(ctx, *admin.AccountID)
+	return settings.OIDC, err
+}
+
+func (s *Service) oidcLogin(w http.ResponseWriter, r *http.Request) {
+	config, err := s.loadPlatformOIDC(r.Context())
+	if err != nil || !config.Enabled || config.IssuerURL == "" || config.ClientID == "" || config.RedirectURL == "" {
+		writeError(w, http.StatusNotFound, 40401, "OIDC login is not configured", requestID(r))
+		return
+	}
+	provider, err := s.oidcProvider(r.Context(), config)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, 50201, "cannot initialize OIDC provider", requestID(r))
+		return
+	}
+	state := randomToken(32)
+	http.SetCookie(w, &http.Cookie{Name: "tsumugi_oidc_state", Value: state, Path: "/api/v1/auth/oidc", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.environment == "production", MaxAge: 600})
+	oauthConfig := oauth2.Config{ClientID: config.ClientID, ClientSecret: config.ClientSecret, Endpoint: provider.Endpoint(), RedirectURL: config.RedirectURL, Scopes: []string{oidc.ScopeOpenID, "profile", "email"}}
+	http.Redirect(w, r, oauthConfig.AuthCodeURL(state), http.StatusFound)
+}
+
+func (s *Service) oidcCallback(w http.ResponseWriter, r *http.Request) {
+	config, err := s.loadPlatformOIDC(r.Context())
+	if err != nil || !config.Enabled || config.IssuerURL == "" || config.ClientID == "" || config.RedirectURL == "" {
+		writeError(w, http.StatusNotFound, 40401, "OIDC login is not configured", requestID(r))
+		return
+	}
+	cookie, cookieErr := r.Cookie("tsumugi_oidc_state")
+	if cookieErr != nil || cookie.Value == "" || !hmac.Equal([]byte(cookie.Value), []byte(r.URL.Query().Get("state"))) {
+		writeError(w, http.StatusBadRequest, 40002, "invalid OIDC state", requestID(r))
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "tsumugi_oidc_state", Value: "", Path: "/api/v1/auth/oidc", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.environment == "production", MaxAge: -1})
+	if providerError := r.URL.Query().Get("error"); providerError != "" {
+		writeError(w, http.StatusUnauthorized, 40103, "OIDC provider rejected login: "+providerError, requestID(r))
+		return
+	}
+	provider, err := s.oidcProvider(r.Context(), config)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, 50201, "cannot initialize OIDC provider", requestID(r))
+		return
+	}
+	oauthConfig := oauth2.Config{ClientID: config.ClientID, ClientSecret: config.ClientSecret, Endpoint: provider.Endpoint(), RedirectURL: config.RedirectURL}
+	token, err := oauthConfig.Exchange(r.Context(), r.URL.Query().Get("code"))
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, 40103, "OIDC code exchange failed", requestID(r))
+		return
+	}
+	rawIDToken, ok := token.Extra("id_token").(string)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, 40103, "OIDC response did not include an ID token", requestID(r))
+		return
+	}
+	idToken, err := provider.Verifier(&oidc.Config{ClientID: config.ClientID}).Verify(r.Context(), rawIDToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, 40103, "invalid OIDC ID token", requestID(r))
+		return
+	}
+	var claims struct {
+		Subject           string `json:"sub"`
+		Email             string `json:"email"`
+		Name              string `json:"name"`
+		PreferredUsername string `json:"preferred_username"`
+	}
+	if err := idToken.Claims(&claims); err != nil || claims.Subject == "" || strings.TrimSpace(claims.Email) == "" {
+		writeError(w, http.StatusUnauthorized, 40103, "OIDC account must provide a subject and email", requestID(r))
+		return
+	}
+	claims.Email = strings.ToLower(strings.TrimSpace(claims.Email))
+	identity := config.IssuerURL + "|" + claims.Subject
+	var user User
+	err = s.db.DB().WithContext(r.Context()).Where("oidc_subject = ?", identity).Take(&user).Error
+	if isNoRows(err) {
+		if existingErr := s.db.DB().WithContext(r.Context()).Where("email = ?", claims.Email).Take(&user).Error; existingErr == nil {
+			err = s.db.DB().WithContext(r.Context()).Model(&User{}).Where("id = ?", user.ID).Update("oidc_subject", identity).Error
+			if err == nil {
+				subject := identity
+				user.OIDCSubject = &subject
+			}
+		} else if isNoRows(existingErr) {
+			site, configErr := s.loadSiteConfig(r.Context())
+			if configErr != nil {
+				writeError(w, 500, 50001, "cannot load site configuration", requestID(r))
+				return
+			}
+			if !emailAllowed(claims.Email, site.EmailWhitelist) {
+				writeError(w, http.StatusForbidden, 40301, "email is not permitted to register", requestID(r))
+				return
+			}
+			user, err = s.createOIDCUser(r.Context(), identity, claims.Email, claims.Name, claims.PreferredUsername)
+		} else {
+			err = existingErr
+		}
+	}
+	if err != nil || !user.IsActive {
+		writeError(w, http.StatusUnauthorized, 40103, "OIDC account is unavailable", requestID(r))
+		return
+	}
+	signed, err := s.issueAccessToken(user)
+	if err != nil {
+		writeError(w, 500, 50001, "cannot issue access token", requestID(r))
+		return
+	}
+	http.Redirect(w, r, strings.TrimRight(s.baseURL, "/")+"/?oidc_token="+url.QueryEscape(signed), http.StatusFound)
+}
+
+func (s *Service) oidcProvider(ctx context.Context, config oidcSiteConfig) (*oidc.Provider, error) {
+	client := s.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	return oidc.NewProvider(oidc.ClientContext(ctx, client), config.IssuerURL)
+}
+
+func (s *Service) createOIDCUser(ctx context.Context, subject, email, name, preferredUsername string) (User, error) {
+	username := normalizeUsername(preferredUsername)
+	if !validUsername(username) {
+		username = strings.Split(email, "@")[0]
+	}
+	accountID, userID := uuid.New(), uuid.New()
+	apiSecret, callbackSecret := randomToken(32), randomToken(32)
+	apiCipher, err := s.encrypt(apiSecret)
+	if err != nil {
+		return User{}, err
+	}
+	callbackCipher, err := s.encrypt(callbackSecret)
+	if err != nil {
+		return User{}, err
+	}
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(randomToken(32)), bcrypt.DefaultCost)
+	if err != nil {
+		return User{}, err
+	}
+	if strings.TrimSpace(name) == "" {
+		name = username
+	}
+	user := User{ID: userID, AccountID: &accountID, Email: email, Username: username, OIDCSubject: &subject, PasswordHash: string(passwordHash), DisplayName: strings.TrimSpace(name), Role: "user", IsActive: true}
+	err = s.db.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		available, err := nextAvailableUsername(tx, username)
+		if err != nil {
+			return err
+		}
+		user.Username = available
+		merchantNo, err := nextMerchantNo(tx)
+		if err != nil {
+			return err
+		}
+		if err := tx.Create(&Account{ID: accountID, Name: user.DisplayName, MerchantNo: merchantNo, APISecretCiphertext: apiCipher, CallbackSecretCiphertext: callbackCipher}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&user).Error
+	})
+	if err == nil {
+		s.audit(ctx, &accountID, &userID, "user.oidc_register", "user", userID.String(), "", map[string]string{"email": email})
+	}
+	return user, err
+}
+
+func (s *Service) issueAccessToken(user User) (string, error) {
+	claims := jwtClaims{Role: user.Role, Email: user.Email, RegisteredClaims: jwt.RegisteredClaims{Subject: user.ID.String(), ExpiresAt: jwt.NewNumericDate(time.Now().Add(8 * time.Hour)), IssuedAt: jwt.NewNumericDate(time.Now())}}
+	if user.AccountID != nil {
+		claims.AccountID = user.AccountID.String()
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.jwtSecret)
 }
 
 func (s *Service) register(w http.ResponseWriter, r *http.Request) {
@@ -402,14 +592,18 @@ func (s *Service) register(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name"`
 		AccountName string `json:"account_name"`
 		Email       string `json:"email"`
+		Username    string `json:"username"`
 		Password    string `json:"password"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	input.DisplayName, input.AccountName, input.Email = strings.TrimSpace(input.DisplayName), strings.TrimSpace(input.AccountName), strings.ToLower(strings.TrimSpace(input.Email))
-	if input.DisplayName == "" || input.AccountName == "" || input.Email == "" || len(input.Password) < 10 {
-		writeError(w, http.StatusBadRequest, 40002, "account_name, display_name, email and a 10-character password are required", requestID(r))
+	input.DisplayName, input.AccountName, input.Email, input.Username = strings.TrimSpace(input.DisplayName), strings.TrimSpace(input.AccountName), strings.ToLower(strings.TrimSpace(input.Email)), normalizeUsername(input.Username)
+	if input.Username == "" {
+		input.Username = usernameFromEmail(input.Email)
+	}
+	if input.DisplayName == "" || input.AccountName == "" || input.Email == "" || !validUsername(input.Username) || len(input.Password) < 10 {
+		writeError(w, http.StatusBadRequest, 40002, "account_name, display_name, email, username and a 10-character password are required", requestID(r))
 		return
 	}
 	if !emailAllowed(input.Email, config.EmailWhitelist) {
@@ -449,14 +643,14 @@ func (s *Service) register(w http.ResponseWriter, r *http.Request) {
 		if err := tx.Create(&Account{ID: accountID, Name: input.AccountName, MerchantNo: merchantNo, APISecretCiphertext: apiCiphertext, CallbackSecretCiphertext: callbackCiphertext}).Error; err != nil {
 			return err
 		}
-		return tx.Create(&User{ID: userID, AccountID: &accountID, Email: input.Email, PasswordHash: string(hash), DisplayName: input.DisplayName, Role: "user", IsActive: true}).Error
+		return tx.Create(&User{ID: userID, AccountID: &accountID, Email: input.Email, Username: input.Username, PasswordHash: string(hash), DisplayName: input.DisplayName, Role: "user", IsActive: true}).Error
 	})
 	if err != nil {
 		writeError(w, http.StatusConflict, 40006, "cannot create user account", requestID(r))
 		return
 	}
 	s.audit(r.Context(), &accountID, &userID, "user.register", "user", userID.String(), requestID(r), map[string]string{"email": input.Email})
-	writeJSON(w, http.StatusCreated, map[string]any{"user": map[string]any{"id": userID, "email": input.Email, "display_name": input.DisplayName}, "account": map[string]any{"id": accountID, "name": input.AccountName, "merchant_no": merchantNo}, "credentials": map[string]string{"api_secret": apiSecret, "callback_secret": callbackSecret}})
+	writeJSON(w, http.StatusCreated, map[string]any{"user": map[string]any{"id": userID, "email": input.Email, "username": input.Username, "display_name": input.DisplayName}, "account": map[string]any{"id": accountID, "name": input.AccountName, "merchant_no": merchantNo}, "credentials": map[string]string{"api_secret": apiSecret, "callback_secret": callbackSecret}})
 }
 
 // setupInitialize creates the one and only first platform administrator. A
@@ -465,6 +659,7 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		DisplayName string `json:"display_name"`
 		Email       string `json:"email"`
+		Username    string `json:"username"`
 		Password    string `json:"password"`
 		AccountName string `json:"account_name"`
 		MerchantNo  string `json:"merchant_no"`
@@ -474,10 +669,14 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 	}
 	input.DisplayName = strings.TrimSpace(input.DisplayName)
 	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
+	input.Username = normalizeUsername(input.Username)
+	if input.Username == "" {
+		input.Username = usernameFromEmail(input.Email)
+	}
 	input.AccountName = strings.TrimSpace(input.AccountName)
 	input.MerchantNo = strings.TrimSpace(input.MerchantNo)
-	if input.DisplayName == "" || input.Email == "" || input.AccountName == "" || len(input.Password) < 10 {
-		writeError(w, http.StatusBadRequest, 40002, "account_name, display_name, email and a 10-character password are required", requestID(r))
+	if input.DisplayName == "" || input.Email == "" || input.AccountName == "" || !validUsername(input.Username) || len(input.Password) < 10 {
+		writeError(w, http.StatusBadRequest, 40002, "account_name, display_name, email, username and a 10-character password are required", requestID(r))
 		return
 	}
 	if input.MerchantNo == "" {
@@ -517,7 +716,7 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 		if err := tx.Create(&Account{ID: accountID, Name: input.AccountName, MerchantNo: input.MerchantNo, APISecretCiphertext: apiCiphertext, CallbackSecretCiphertext: callbackCiphertext}).Error; err != nil {
 			return err
 		}
-		return tx.Create(&User{ID: adminID, AccountID: &accountID, Email: input.Email, PasswordHash: string(hash), DisplayName: input.DisplayName, Role: "platform_admin", IsActive: true}).Error
+		return tx.Create(&User{ID: adminID, AccountID: &accountID, Email: input.Email, Username: input.Username, PasswordHash: string(hash), DisplayName: input.DisplayName, Role: "platform_admin", IsActive: true}).Error
 	})
 	if err != nil {
 		if errors.Is(err, errSetupComplete) || isUniqueViolation(err) {
@@ -528,14 +727,20 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r.Context(), &accountID, &adminID, "system.oobe_complete", "account", accountID.String(), requestID(r), map[string]string{"email": input.Email, "account_name": input.AccountName})
-	writeJSON(w, http.StatusCreated, map[string]any{"message": "initial user created", "user": map[string]any{"id": adminID, "email": input.Email, "display_name": input.DisplayName, "role": "platform_admin"}, "account": map[string]any{"id": accountID, "name": input.AccountName, "merchant_no": input.MerchantNo}, "credentials": map[string]string{"api_secret": apiSecret, "callback_secret": callbackSecret}})
+	writeJSON(w, http.StatusCreated, map[string]any{"message": "initial user created", "user": map[string]any{"id": adminID, "email": input.Email, "username": input.Username, "display_name": input.DisplayName, "role": "platform_admin"}, "account": map[string]any{"id": accountID, "name": input.AccountName, "merchant_no": input.MerchantNo}, "credentials": map[string]string{"api_secret": apiSecret, "callback_secret": callbackSecret}})
 }
 
 func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin")
 	switch {
-	case r.Method == "GET" && path == "/me":
-		s.adminMe(w, r)
+	case path == "/me":
+		if r.Method == "GET" {
+			s.adminMe(w, r)
+		} else if r.Method == "PATCH" {
+			s.patchCurrentUser(w, r)
+		} else {
+			methodNotAllowed(w, r)
+		}
 	case r.Method == "GET" && path == "/dashboard":
 		s.dashboard(w, r)
 	case path == "/users":
@@ -558,6 +763,8 @@ func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
 		}
 	case strings.HasPrefix(path, "/channels/") && r.Method == "PATCH":
 		s.patchChannel(w, r, strings.TrimPrefix(path, "/channels/"))
+	case strings.HasPrefix(path, "/channels/") && r.Method == "DELETE":
+		s.deleteChannel(w, r, strings.TrimPrefix(path, "/channels/"))
 	case path == "/bills" && r.Method == "GET":
 		s.listBills(w, r)
 	case strings.HasPrefix(path, "/bills/") && strings.HasSuffix(path, "/refunds") && r.Method == "POST":
@@ -591,7 +798,12 @@ func methodNotAllowed(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Service) adminMe(w http.ResponseWriter, r *http.Request) {
 	p := currentPrincipal(r)
-	response := map[string]any{"id": p.UserID, "email": p.Email, "role": p.Role, "account_id": p.AccountID}
+	var user User
+	if err := s.db.DB().WithContext(r.Context()).Select("username", "display_name").Take(&user, "id = ?", p.UserID).Error; err != nil {
+		writeError(w, 500, 50001, "cannot load user profile", requestID(r))
+		return
+	}
+	response := map[string]any{"id": p.UserID, "email": p.Email, "username": user.Username, "display_name": user.DisplayName, "role": p.Role, "account_id": p.AccountID}
 	if p.AccountID != nil {
 		var account Account
 		if err := s.db.DB().WithContext(r.Context()).Select("name", "merchant_no", "status").Take(&account, "id = ?", *p.AccountID).Error; err == nil {
@@ -786,7 +998,7 @@ func (s *Service) loadAccountSettings(ctx context.Context, accountID uuid.UUID) 
 	return settings, true, nil
 }
 func defaultSiteConfig() siteConfig {
-	return siteConfig{SiteName: "Tsumugi Pay", AllowPasswordLogin: true, AllowPasswordRegistration: false, EmailWhitelist: []string{}}
+	return siteConfig{SiteName: "Tsumugi Pay", ThemeColor: "#2f9c84", AllowPasswordLogin: true, AllowPasswordRegistration: false, EmailWhitelist: []string{}}
 }
 func (s *Service) loadSiteConfig(ctx context.Context) (siteConfig, error) {
 	config := defaultSiteConfig()
@@ -804,6 +1016,9 @@ func (s *Service) loadSiteConfig(ctx context.Context) (siteConfig, error) {
 	if config.SiteName == "" {
 		config.SiteName = defaultSiteConfig().SiteName
 	}
+	if !validThemeColor(config.ThemeColor) {
+		config.ThemeColor = defaultSiteConfig().ThemeColor
+	}
 	return config, nil
 }
 func (s *Service) saveSiteConfig(ctx context.Context, config siteConfig) error {
@@ -811,32 +1026,113 @@ func (s *Service) saveSiteConfig(ctx context.Context, config siteConfig) error {
 	if config.SiteName == "" {
 		config.SiteName = defaultSiteConfig().SiteName
 	}
-	config.EmailWhitelist = compactStrings(config.EmailWhitelist)
+	if len(config.SiteName) > 120 {
+		return errors.New("site name is too long")
+	}
+	if config.ThemeColor == "" {
+		config.ThemeColor = defaultSiteConfig().ThemeColor
+	}
+	if !validThemeColor(config.ThemeColor) {
+		return errors.New("theme color must be a hex color")
+	}
+	config.FaviconURL = strings.TrimSpace(config.FaviconURL)
+	if config.FaviconURL != "" && !strings.HasPrefix(config.FaviconURL, "/") && !s.validExternalURL(config.FaviconURL) {
+		return errors.New("favicon URL must be an HTTPS URL or site path")
+	}
+	whitelist, err := normalizeEmailSuffixWhitelist(config.EmailWhitelist)
+	if err != nil {
+		return err
+	}
+	config.EmailWhitelist = whitelist
 	encoded, err := json.Marshal(config)
 	if err != nil {
 		return err
 	}
 	return s.db.DB().WithContext(ctx).Save(&SystemSetting{SettingKey: "site_config", SettingValue: string(encoded)}).Error
 }
-func compactStrings(values []string) []string {
+func normalizeEmailSuffixWhitelist(values []string) ([]string, error) {
 	result := make([]string, 0, len(values))
 	for _, value := range values {
-		if value = strings.ToLower(strings.TrimSpace(value)); value != "" {
-			result = append(result, value)
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
 		}
+		if !strings.HasPrefix(value, "@") {
+			value = "@" + value
+		}
+		if len(value) < 4 || strings.Count(value, "@") != 1 || strings.ContainsAny(value, " /\\") {
+			return nil, errors.New("email whitelist entries must be email suffixes such as @example.com")
+		}
+		result = append(result, value)
 	}
-	return result
+	return result, nil
 }
 func emailAllowed(email string, whitelist []string) bool {
 	if len(whitelist) == 0 {
 		return true
 	}
 	for _, entry := range whitelist {
-		if entry == email || strings.HasPrefix(entry, "@") && strings.HasSuffix(email, entry) {
+		if strings.HasPrefix(entry, "@") && strings.HasSuffix(email, entry) {
 			return true
 		}
 	}
 	return false
+}
+func validThemeColor(value string) bool {
+	if len(value) != 7 || value[0] != '#' {
+		return false
+	}
+	for _, char := range value[1:] {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+func normalizeUsername(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
+func usernameFromEmail(email string) string { return normalizeUsername(strings.Split(email, "@")[0]) }
+func validUsername(value string) bool {
+	if len(value) < 3 || len(value) > 64 {
+		return false
+	}
+	for _, char := range value {
+		if !((char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '_' || char == '-') {
+			return false
+		}
+	}
+	return true
+}
+func nextMerchantNo(tx *gorm.DB) (string, error) {
+	var accounts []Account
+	if err := tx.Select("merchant_no").Find(&accounts).Error; err != nil {
+		return "", err
+	}
+	maximum := int64(999)
+	for _, account := range accounts {
+		if value, parseErr := strconv.ParseInt(account.MerchantNo, 10, 64); parseErr == nil && value > maximum {
+			maximum = value
+		}
+	}
+	return strconv.FormatInt(maximum+1, 10), nil
+}
+func nextAvailableUsername(tx *gorm.DB, preferred string) (string, error) {
+	base := normalizeUsername(preferred)
+	if !validUsername(base) {
+		base = "user"
+	}
+	for suffix := 1; ; suffix++ {
+		candidate := base
+		if suffix > 1 {
+			candidate = fmt.Sprintf("%s-%d", base, suffix)
+		}
+		var count int64
+		if err := tx.Model(&User{}).Where("username = ?", candidate).Count(&count).Error; err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return candidate, nil
+		}
+	}
 }
 
 func (s *Service) encryptConfig(value any) (string, error) {
@@ -860,7 +1156,7 @@ func siteSettingsPublic(settings accountSiteSettings) map[string]any {
 	return map[string]any{
 		"email":    map[string]any{"host": settings.Email.Host, "port": settings.Email.Port, "username": settings.Email.Username, "from": settings.Email.From, "password_configured": settings.Email.Password != ""},
 		"hcaptcha": map[string]any{"enabled": settings.HCaptcha.Enabled, "site_key": settings.HCaptcha.SiteKey, "secret_key_configured": settings.HCaptcha.SecretKey != ""},
-		"oidc":     map[string]any{"enabled": settings.OIDC.Enabled, "issuer_url": settings.OIDC.IssuerURL, "client_id": settings.OIDC.ClientID, "redirect_url": settings.OIDC.RedirectURL, "authorization_endpoint": settings.OIDC.AuthorizationEndpoint, "token_endpoint": settings.OIDC.TokenEndpoint, "jwks_uri": settings.OIDC.JWKSURI, "client_secret_configured": settings.OIDC.ClientSecret != ""},
+		"oidc":     map[string]any{"enabled": settings.OIDC.Enabled, "issuer_url": settings.OIDC.IssuerURL, "client_id": settings.OIDC.ClientID, "redirect_url": settings.OIDC.RedirectURL, "authorization_endpoint": settings.OIDC.AuthorizationEndpoint, "token_endpoint": settings.OIDC.TokenEndpoint, "jwks_uri": settings.OIDC.JWKSURI, "login_label": settings.OIDC.LoginLabel, "client_secret_configured": settings.OIDC.ClientSecret != ""},
 	}
 }
 
@@ -877,7 +1173,7 @@ func (s *Service) listUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]map[string]any, 0, len(users))
 	for _, user := range users {
-		item := map[string]any{"id": user.ID, "email": user.Email, "display_name": user.DisplayName, "role": user.Role, "is_active": user.IsActive, "created_at": user.CreatedAt}
+		item := map[string]any{"id": user.ID, "email": user.Email, "username": user.Username, "display_name": user.DisplayName, "role": user.Role, "is_active": user.IsActive, "created_at": user.CreatedAt}
 		if user.Account != nil {
 			item["account"] = map[string]any{"name": user.Account.Name, "merchant_no": user.Account.MerchantNo}
 		}
@@ -894,15 +1190,19 @@ func (s *Service) createUser(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		DisplayName string `json:"display_name"`
 		Email       string `json:"email"`
+		Username    string `json:"username"`
 		Password    string `json:"password"`
 		AccountName string `json:"account_name"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	input.DisplayName, input.Email, input.AccountName = strings.TrimSpace(input.DisplayName), strings.ToLower(strings.TrimSpace(input.Email)), strings.TrimSpace(input.AccountName)
-	if input.DisplayName == "" || input.Email == "" || input.AccountName == "" || len(input.Password) < 10 {
-		writeError(w, 400, 40002, "account_name, display_name, email and a 10-character password are required", requestID(r))
+	input.DisplayName, input.Email, input.AccountName, input.Username = strings.TrimSpace(input.DisplayName), strings.ToLower(strings.TrimSpace(input.Email)), strings.TrimSpace(input.AccountName), normalizeUsername(input.Username)
+	if input.Username == "" {
+		input.Username = usernameFromEmail(input.Email)
+	}
+	if input.DisplayName == "" || input.Email == "" || input.AccountName == "" || !validUsername(input.Username) || len(input.Password) < 10 {
+		writeError(w, 400, 40002, "account_name, display_name, email, username and a 10-character password are required", requestID(r))
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
@@ -938,14 +1238,14 @@ func (s *Service) createUser(w http.ResponseWriter, r *http.Request) {
 		if err := tx.Create(&Account{ID: accountID, Name: input.AccountName, MerchantNo: merchantNo, APISecretCiphertext: apiCipher, CallbackSecretCiphertext: callbackCipher}).Error; err != nil {
 			return err
 		}
-		return tx.Create(&User{ID: userID, AccountID: &accountID, Email: input.Email, PasswordHash: string(hash), DisplayName: input.DisplayName, Role: "user", IsActive: true}).Error
+		return tx.Create(&User{ID: userID, AccountID: &accountID, Email: input.Email, Username: input.Username, PasswordHash: string(hash), DisplayName: input.DisplayName, Role: "user", IsActive: true}).Error
 	})
 	if err != nil {
 		writeError(w, 409, 40006, "cannot create user", requestID(r))
 		return
 	}
 	s.audit(r.Context(), &accountID, &p.UserID, "user.create", "user", userID.String(), requestID(r), map[string]string{"email": input.Email})
-	writeJSON(w, 201, map[string]any{"id": userID, "email": input.Email, "merchant_no": merchantNo, "credentials": map[string]string{"api_secret": api, "callback_secret": callback}})
+	writeJSON(w, 201, map[string]any{"id": userID, "email": input.Email, "username": input.Username, "merchant_no": merchantNo, "credentials": map[string]string{"api_secret": api, "callback_secret": callback}})
 }
 func (s *Service) patchUser(w http.ResponseWriter, r *http.Request, idText string) {
 	p := currentPrincipal(r)
@@ -961,6 +1261,8 @@ func (s *Service) patchUser(w http.ResponseWriter, r *http.Request, idText strin
 	var input struct {
 		IsActive    *bool   `json:"is_active"`
 		DisplayName *string `json:"display_name"`
+		Username    *string `json:"username"`
+		Password    *string `json:"password"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -972,6 +1274,26 @@ func (s *Service) patchUser(w http.ResponseWriter, r *http.Request, idText strin
 	if input.DisplayName != nil {
 		updates["display_name"] = strings.TrimSpace(*input.DisplayName)
 	}
+	if input.Username != nil {
+		username := normalizeUsername(*input.Username)
+		if !validUsername(username) {
+			writeError(w, 400, 40002, "username must be 3-64 letters, numbers, _ or -", requestID(r))
+			return
+		}
+		updates["username"] = username
+	}
+	if input.Password != nil {
+		if len(*input.Password) < 10 {
+			writeError(w, 400, 40002, "password must be at least 10 characters", requestID(r))
+			return
+		}
+		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*input.Password), bcrypt.DefaultCost)
+		if hashErr != nil {
+			writeError(w, 500, 50001, "cannot secure password", requestID(r))
+			return
+		}
+		updates["password_hash"] = string(hash)
+	}
 	if len(updates) > 0 {
 		if err := s.db.DB().WithContext(r.Context()).Model(&User{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 			writeError(w, 500, 50001, "cannot update user", requestID(r))
@@ -979,6 +1301,57 @@ func (s *Service) patchUser(w http.ResponseWriter, r *http.Request, idText strin
 		}
 	}
 	s.audit(r.Context(), nil, &p.UserID, "user.update", "user", id.String(), requestID(r), updates)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) patchCurrentUser(w http.ResponseWriter, r *http.Request) {
+	p := currentPrincipal(r)
+	var input struct {
+		Username    *string `json:"username"`
+		DisplayName *string `json:"display_name"`
+		Password    *string `json:"password"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	updates := map[string]any{}
+	if input.Username != nil {
+		username := normalizeUsername(*input.Username)
+		if !validUsername(username) {
+			writeError(w, 400, 40002, "username must be 3-64 letters, numbers, _ or -", requestID(r))
+			return
+		}
+		updates["username"] = username
+	}
+	if input.DisplayName != nil {
+		displayName := strings.TrimSpace(*input.DisplayName)
+		if displayName == "" {
+			writeError(w, 400, 40002, "display name is required", requestID(r))
+			return
+		}
+		updates["display_name"] = displayName
+	}
+	if input.Password != nil {
+		if len(*input.Password) < 10 {
+			writeError(w, 400, 40002, "password must be at least 10 characters", requestID(r))
+			return
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(*input.Password), bcrypt.DefaultCost)
+		if err != nil {
+			writeError(w, 500, 50001, "cannot secure password", requestID(r))
+			return
+		}
+		updates["password_hash"] = string(hash)
+	}
+	if len(updates) == 0 {
+		writeError(w, 400, 40002, "no profile changes provided", requestID(r))
+		return
+	}
+	if err := s.db.DB().WithContext(r.Context()).Model(&User{}).Where("id = ?", p.UserID).Updates(updates).Error; err != nil {
+		writeError(w, 409, 40006, "cannot update profile", requestID(r))
+		return
+	}
+	s.audit(r.Context(), p.AccountID, &p.UserID, "user.profile_update", "user", p.UserID.String(), requestID(r), map[string]bool{"username": input.Username != nil, "display_name": input.DisplayName != nil, "password": input.Password != nil})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1272,6 +1645,43 @@ func (s *Service) patchChannel(w http.ResponseWriter, r *http.Request, idText st
 		}
 	}
 	s.audit(r.Context(), &channel.AccountID, &p.UserID, "channel.update", "payment_channel", channelID.String(), requestID(r), map[string]any{"provider": channel.Provider, "config_updated": input.Config != nil, "enabled": input.Enabled})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) deleteChannel(w http.ResponseWriter, r *http.Request, idText string) {
+	p := currentPrincipal(r)
+	if !canManagePayments(p) {
+		writeError(w, http.StatusForbidden, 40301, "payment operator role required", requestID(r))
+		return
+	}
+	channelID, err := uuid.Parse(idText)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, 40002, "invalid channel id", requestID(r))
+		return
+	}
+	var channel PaymentChannel
+	if err := s.db.DB().WithContext(r.Context()).Take(&channel, "id = ?", channelID).Error; err != nil {
+		writeError(w, http.StatusNotFound, 40401, "channel not found", requestID(r))
+		return
+	}
+	if !s.mayAccessAccount(p, channel.AccountID) {
+		writeError(w, http.StatusForbidden, 40301, "account access denied", requestID(r))
+		return
+	}
+	var billCount int64
+	if err := s.db.DB().WithContext(r.Context()).Model(&Bill{}).Where("channel_id = ?", channelID).Count(&billCount).Error; err != nil {
+		writeError(w, 500, 50001, "cannot inspect channel usage", requestID(r))
+		return
+	}
+	if billCount > 0 {
+		writeError(w, http.StatusConflict, 40901, "cannot delete a channel with payment bills", requestID(r))
+		return
+	}
+	if err := s.db.DB().WithContext(r.Context()).Delete(&channel).Error; err != nil {
+		writeError(w, 500, 50001, "cannot delete payment channel", requestID(r))
+		return
+	}
+	s.audit(r.Context(), &channel.AccountID, &p.UserID, "channel.delete", "payment_channel", channelID.String(), requestID(r), map[string]string{"provider": channel.Provider})
 	w.WriteHeader(http.StatusNoContent)
 }
 

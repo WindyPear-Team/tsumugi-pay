@@ -263,6 +263,15 @@ func TestSiteAccessControlsAndUserManagement(t *testing.T) {
 		t.Fatalf("allowed registration: %d %s", registration.Code, registration.Body.String())
 	}
 	userToken := loginToken(t, handler, "user@allowed.test", "A-strong-password")
+	profileUpdate := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/me", bytes.NewBufferString(`{"username":"allowed-user","password":"A-new-strong-password"}`))
+	profileUpdate.Header.Set("Authorization", "Bearer "+userToken)
+	profileUpdate.Header.Set("Content-Type", "application/json")
+	profileResponse := httptest.NewRecorder()
+	handler.ServeHTTP(profileResponse, profileUpdate)
+	if profileResponse.Code != http.StatusNoContent {
+		t.Fatalf("update user profile: %d %s", profileResponse.Code, profileResponse.Body.String())
+	}
+	_ = loginToken(t, handler, "allowed-user", "A-new-strong-password")
 	settingsRequest := httptest.NewRequest(http.MethodGet, "/api/v1/admin/site-settings", nil)
 	settingsRequest.Header.Set("Authorization", "Bearer "+userToken)
 	settingsResponse := httptest.NewRecorder()
@@ -277,6 +286,21 @@ func TestSiteAccessControlsAndUserManagement(t *testing.T) {
 	handler.ServeHTTP(usersResponse, usersRequest)
 	if usersResponse.Code != http.StatusOK || !bytes.Contains(usersResponse.Body.Bytes(), []byte(`"email":"user@allowed.test"`)) {
 		t.Fatalf("list users: %d %s", usersResponse.Code, usersResponse.Body.String())
+	}
+}
+
+func TestEmailSuffixWhitelist(t *testing.T) {
+	if !emailAllowed("user@example.com", []string{"@example.com"}) {
+		t.Fatal("matching email suffix should be allowed")
+	}
+	if emailAllowed("user@example.com", []string{"user@example.com"}) {
+		t.Fatal("a full email address must not act as a whitelist suffix")
+	}
+	if _, err := normalizeEmailSuffixWhitelist([]string{"@example.com", "@company.cn"}); err != nil {
+		t.Fatalf("valid suffix whitelist: %v", err)
+	}
+	if _, err := normalizeEmailSuffixWhitelist([]string{"user@example.com"}); err == nil {
+		t.Fatal("full email address should be rejected as a suffix whitelist entry")
 	}
 }
 
