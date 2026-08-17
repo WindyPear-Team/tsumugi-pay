@@ -15,6 +15,85 @@ body {
   min-width: 320px;
   background: #f5f6f2;
 }
+.checkout-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #f0f3ee;
+}
+.checkout-shell {
+  width: min(100%, 440px);
+  min-height: 480px;
+  padding: 28px;
+  border: 1px solid #d9e0dc;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 16px 36px rgba(20, 48, 40, 0.1);
+}
+.checkout-brand {
+  color: #2f7363;
+  font-size: 15px;
+  font-weight: 800;
+}
+.checkout-head {
+  padding: 30px 0 20px;
+  text-align: center;
+}
+.checkout-head p {
+  margin: 0 0 8px;
+  color: #658078;
+  font-size: 13px;
+}
+.checkout-head h1 {
+  margin: 0;
+  color: #18221f;
+  font-size: 20px;
+  font-weight: 700;
+}
+.checkout-head strong {
+  display: block;
+  margin-top: 14px;
+  color: #162c26;
+  font-size: 32px;
+}
+.checkout-qr {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 10px 0 22px;
+}
+.checkout-qr svg {
+  width: min(220px, 70vw);
+  height: auto;
+  border: 1px solid #e0e6e2;
+  border-radius: 4px;
+  background: #fff;
+}
+.checkout-qr p,
+.checkout-message {
+  margin: 0;
+  color: #5c6c66;
+  font-size: 14px;
+  text-align: center;
+}
+.checkout-message {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+}
+.checkout-message.success { color: #177b56; }
+.checkout-message.error { color: #b34035; }
+.checkout-footer {
+  display: grid;
+  gap: 6px;
+  border-top: 1px solid #e6ebe8;
+  padding-top: 16px;
+  color: #718078;
+  font-family: "DM Mono", monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
 button,
 input,
 textarea,

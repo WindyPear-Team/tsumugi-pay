@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import type { FormEvent } from "react"
-import { Search } from "lucide-react"
+import { Copy, Eye, EyeOff, Search } from "lucide-react"
 
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -90,6 +90,7 @@ export function AuditPage({ data }: { data: AuditLog[] }) {
               <tr>
                 <th>操作</th>
                 <th>对象</th>
+                <th>结果</th>
                 <th>请求 ID</th>
                 <th>发生时间</th>
               </tr>
@@ -102,6 +103,7 @@ export function AuditPage({ data }: { data: AuditLog[] }) {
                     {entry.target_type}
                     <small>{entry.target_id}</small>
                   </td>
+                  <td className="mono">{entry.detail ? JSON.stringify(entry.detail) : "—"}</td>
                   <td className="mono">{entry.request_id}</td>
                   <td>{formatDate(entry.created_at)}</td>
                 </tr>
@@ -115,9 +117,27 @@ export function AuditPage({ data }: { data: AuditLog[] }) {
     </div>
   )
 }
-export function DevelopersPage({ account }: { account?: Account }) {
+export function DevelopersPage({ account, request }: { account?: Account; request: ApiRequest }) {
   const merchant = account?.merchant_no || "{merchant_no}"
   const gateway = window.location.origin
+  const [apiSecret, setAPISecret] = useState("")
+  const [loadingSecret, setLoadingSecret] = useState(false)
+  const [secretError, setSecretError] = useState("")
+  async function revealSecret() {
+    setSecretError("")
+    setLoadingSecret(true)
+    try {
+      const result = await request("/api/v1/admin/developer-credentials")
+      setAPISecret(result.api_secret || "")
+    } catch (err: any) {
+      setSecretError(err.message)
+    } finally {
+      setLoadingSecret(false)
+    }
+  }
+  async function copySecret() {
+    if (apiSecret) await navigator.clipboard.writeText(apiSecret)
+  }
   return (
     <div className="content">
       <section className="developer-hero">
@@ -130,12 +150,21 @@ export function DevelopersPage({ account }: { account?: Account }) {
           <h3>账户配置</h3>
           <Detail label="网关地址" value={gateway} />
           <Detail label="商户号（pid）" value={merchant} />
-          <Detail label="商户密钥（key）" value="创建账户时保存的 API 请求密钥" />
+          <Detail label="商户密钥（key）" value={apiSecret || "已隐藏"} />
           <Detail label="签名算法" value="HMAC-SHA256（兼容 MD5）" />
+          <div className="row-actions developer-key-actions">
+            <button className="icon-button" title={apiSecret ? "隐藏商户密钥" : "显示商户密钥"} aria-label={apiSecret ? "隐藏商户密钥" : "显示商户密钥"} onClick={() => (apiSecret ? setAPISecret("") : revealSecret())} disabled={loadingSecret}>
+              {apiSecret ? <EyeOff size={15} /> : <Eye size={15} />}
+            </button>
+            <button className="icon-button" title="复制商户密钥" aria-label="复制商户密钥" onClick={copySecret} disabled={!apiSecret}>
+              <Copy size={15} />
+            </button>
+          </div>
+          {secretError && <p className="form-error">{secretError}</p>}
         </article>
         <article className="panel">
           <h3>易支付端点</h3>
-          <Detail label="提交下单" value={`${gateway}/submit.php`} />
+          <Detail label="提交下单（GET / POST）" value={`${gateway}/submit.php`} />
           <Detail label="接口下单" value={`${gateway}/mapi.php`} />
           <Detail label="订单查询" value={`${gateway}/api.php?act=order`} />
         </article>
@@ -154,7 +183,7 @@ export function DevelopersPage({ account }: { account?: Account }) {
             <h3>易支付表单与查询</h3>
           </div>
           <pre>
-            <code>{`表单地址\nPOST ${gateway}/submit.php\n\n表单字段\npid=${merchant}\ntype=alipay\nout_trade_no=ORDER-001\nname=示例订单\nmoney=9.90\nnotify_url=https://merchant.example/notify\nsign_type=HMAC-SHA256\nsign=使用 key 签名\n\n查询地址\nGET ${gateway}/api.php?act=order&pid=${merchant}&out_trade_no=ORDER-001&sign=...`}</code>
+            <code>{`表单地址\nGET 或 POST ${gateway}/submit.php\n\n表单字段\npid=${merchant}\ntype=alipay\nout_trade_no=ORDER-001\nname=示例订单\nmoney=9.90\nnotify_url=https://merchant.example/notify\nsign_type=MD5\nsign=非空字段按字段名排序并以 & 连接，末尾追加 key 后取 MD5\n\n查询地址\nGET ${gateway}/api.php?act=order&pid=${merchant}&out_trade_no=ORDER-001&sign=...`}</code>
           </pre>
         </article>
       </section>

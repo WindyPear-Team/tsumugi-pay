@@ -22,6 +22,11 @@ export function BillsPage({ data, canManage, request, onRefresh }: { data: Bill[
     await request(`/api/v1/admin/bills/${bill.id}/close`, { method: "POST" })
     onRefresh()
   }
+  async function retryCallback(bill: Bill) {
+    if (!confirm(`确认向 ${bill.notify_url} 重发支付成功通知？`)) return
+    await request(`/api/v1/admin/bills/${bill.id}/notify`, { method: "POST" })
+    onRefresh()
+  }
   return (
     <div className="content">
       <section className="page-actions">
@@ -99,7 +104,12 @@ export function BillsPage({ data, canManage, request, onRefresh }: { data: Bill[
                         <button onClick={() => close(bill)}>关闭</button>
                       </>
                     )}
-                    {canManage && bill.status === "paid" && <button onClick={() => setRefund(bill)}>退款</button>}
+                    {canManage && bill.status === "paid" && (
+                      <>
+                        <button onClick={() => retryCallback(bill)}>重发回调</button>
+                        <button onClick={() => setRefund(bill)}>退款</button>
+                      </>
+                    )}
                   </td>
                 </tr>
               ))}

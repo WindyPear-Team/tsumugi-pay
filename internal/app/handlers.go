@@ -101,6 +101,7 @@ type paymentInput struct {
 	Scene           string `json:"scene"`
 	SignType        string `json:"sign_type"`
 	Sign            string `json:"sign"`
+	signatureValues url.Values
 }
 type paymentResponse struct {
 	Code    int    `json:"code"`
@@ -110,6 +111,7 @@ type paymentResponse struct {
 		MerchantOrderNo string     `json:"merchant_order_no"`
 		PayURL          string     `json:"pay_url,omitempty"`
 		QRCode          string     `json:"qrcode,omitempty"`
+		CheckoutURL     string     `json:"checkout_url,omitempty"`
 		ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 	} `json:"data"`
 }
@@ -120,7 +122,7 @@ func (s *Service) discovery(w http.ResponseWriter, r *http.Request) {
 		"spec": "Open Payment Specification", "spec_version": "1.0.0", "profile": []string{"OPS-EPAY-1", "OPS-CORE-1", "OPS-EXT-1"},
 		"platform":        map[string]any{"name": "Tsumugi Pay", "vendor": "tsumugi", "homepage": base, "charset": "utf-8", "timezone": "Asia/Shanghai", "currency": "CNY"},
 		"endpoints":       map[string]any{"submit": base + "/submit.php", "mapi": base + "/mapi.php", "api": base + "/api.php", "query": base + "/api.php?act=order"},
-		"transports":      map[string]any{"payment_create": []string{"form_post", "json"}, "query": []string{"form_get", "form_post"}, "refund": []string{"json"}, "notify": []string{"form_post"}},
+		"transports":      map[string]any{"payment_create": []string{"form_get", "form_post", "json"}, "query": []string{"form_get", "form_post"}, "refund": []string{"json"}, "notify": []string{"form_post"}},
 		"signing":         map[string]any{"default": "HMAC-SHA256", "supported": []string{"MD5", "HMAC-SHA256"}, "sign_field": "sign", "sign_type_field": "sign_type", "empty_value_policy": "omit", "sort": "ascii_asc", "charset": "utf-8"},
 		"payment_methods": []map[string]any{{"code": "alipay", "name": "支付宝", "aliases": []string{"alipay", "ali"}, "scenes": []string{"pc", "wap"}, "enabled": true}, {"code": "wxpay", "name": "微信支付", "aliases": []string{"wxpay", "wechat"}, "scenes": []string{"pc", "wap", "qr", "jsapi"}, "enabled": true}},
 		"fields":          map[string]any{"merchant_id": []string{"pid", "merchant_id"}, "payment_method": []string{"type", "payment_method"}, "merchant_order_no": []string{"out_trade_no", "merchant_order_no"}, "subject": []string{"name", "subject"}, "amount": []string{"money", "amount"}, "notify_url": []string{"notify_url"}, "return_url": []string{"return_url"}, "metadata": []string{"param", "metadata"}},
@@ -135,19 +137,54 @@ func (s *Service) publicCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.processPublicCreate(w, r, input, false)
 }
+
+func (s *Service) publicCheckout(w http.ResponseWriter, r *http.Request) {
+	orderNo := strings.TrimSpace(r.PathValue("orderNo"))
+	if orderNo == "" || len(orderNo) > 64 {
+		writeError(w, http.StatusBadRequest, 40002, "invalid payment order", requestID(r))
+		return
+	}
+	var bill Bill
+	if err := s.db.DB().WithContext(r.Context()).Take(&bill, "platform_order_no = ?", orderNo).Error; err != nil {
+		writeError(w, http.StatusNotFound, 40401, "payment order not found", requestID(r))
+		return
+	}
+	if bill.Status == "pending" && s.shouldPollBill(bill.ID) {
+		if _, _, err := s.pollBill(r.Context(), billRecordFromModel(bill)); err != nil {
+			s.logger.Warn("payment polling failed", "bill_id", bill.ID, "error", err)
+		}
+		_ = s.db.DB().WithContext(r.Context()).Take(&bill, "id = ?", bill.ID).Error
+	}
+	var payload map[string]any
+	_ = json.Unmarshal([]byte(bill.ProviderPayload), &payload)
+	qrcode, _ := payload["checkout_qrcode"].(string)
+	if qrcode == "" {
+		qrcode, _ = payload["code_url"].(string)
+	}
+	payURL, _ := payload["checkout_pay_url"].(string)
+	if payURL == "" {
+		payURL, _ = payload["h5_url"].(string)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"platform_order_no": bill.PlatformOrderNo, "merchant_order_no": bill.MerchantOrderNo, "subject": bill.Subject,
+		"amount": moneyString(bill.AmountMinor), "currency": bill.Currency, "provider": bill.Provider, "status": bill.Status,
+		"qrcode": qrcode, "pay_url": payURL, "return_url": stringValue(bill.ReturnURL), "expires_at": bill.ExpiresAt, "paid_at": bill.PaidAt,
+	})
+}
+
 func (s *Service) legacyCreate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		writeError(w, 400, 40002, "invalid form", requestID(r))
 		return
 	}
-	input := inputFromValues(r.PostForm)
+	input := inputFromValues(r.Form)
 	response, err := s.createBill(r.Context(), input)
 	if err != nil {
 		writePublicError(w, r, err)
 		return
 	}
-	if response.Data.PayURL != "" {
-		http.Redirect(w, r, response.Data.PayURL, http.StatusSeeOther)
+	if response.Data.CheckoutURL != "" {
+		http.Redirect(w, r, response.Data.CheckoutURL, http.StatusSeeOther)
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
@@ -200,6 +237,10 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 	}
 	channelModel, err := s.selectChannel(ctx, account.ID, input.PaymentMethod)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return paymentResponse{}, clientError{40003, "no enabled payment channel for the selected payment method"}
+		}
+		s.logger.Error("cannot select payment channel", "merchant_order_no", input.MerchantOrderNo, "provider", input.PaymentMethod, "error", err)
 		return paymentResponse{}, err
 	}
 	if !channelModel.Enabled {
@@ -207,12 +248,14 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 	}
 	plain, err := s.decrypt(channelModel.ConfigCiphertext)
 	if err != nil {
-		return paymentResponse{}, err
+		s.logger.Error("cannot read payment channel config", "channel_id", channelModel.ID, "error", err)
+		return paymentResponse{}, providerError{cause: errors.New("payment channel credentials cannot be read")}
 	}
 	channel := channelRecord{ID: channelModel.ID, AccountID: account.ID, Provider: input.PaymentMethod, Enabled: channelModel.Enabled, DisplayName: channelModel.DisplayName, WebhookToken: channelModel.WebhookToken}
 	if plain != "" {
 		if err = json.Unmarshal([]byte(plain), &channel.Config); err != nil {
-			return paymentResponse{}, errors.New("stored channel config is invalid")
+			s.logger.Error("payment channel config is invalid", "channel_id", channelModel.ID, "error", err)
+			return paymentResponse{}, providerError{cause: errors.New("payment channel configuration is invalid")}
 		}
 	}
 	scene := input.Scene
@@ -233,17 +276,29 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 	bill := billRecord{ID: uuid.New(), AccountID: account.ID, ChannelID: channelModel.ID, PlatformOrderNo: "TP" + strings.ToUpper(strings.ReplaceAll(uuid.NewString(), "-", ""))[:24], MerchantOrderNo: input.MerchantOrderNo, Subject: input.Subject, Description: input.Description, AmountMinor: amount, Currency: "CNY", Provider: input.PaymentMethod, Scene: scene, Status: "pending", NotifyURL: input.NotifyURL, ReturnURL: input.ReturnURL, Metadata: input.Metadata, ExpiresAt: &expires, CreatedAt: nowUTC(), UpdatedAt: nowUTC()}
 	err = s.db.DB().WithContext(ctx).Create(bill.toModel()).Error
 	if err != nil {
-		if strings.Contains(err.Error(), "bills_account_id_merchant_order_no_key") {
+		if isUniqueViolation(err) {
 			return paymentResponse{}, clientError{40006, "duplicate merchant order number"}
 		}
+		s.logger.Error("cannot create payment bill", "merchant_order_no", input.MerchantOrderNo, "error", err)
 		return paymentResponse{}, err
 	}
 	result, err := s.createPayment(ctx, channel, bill)
 	if err != nil {
 		_ = s.db.DB().WithContext(ctx).Model(&Bill{}).Where("id = ?", bill.ID).Update("status", "failed").Error
-		return paymentResponse{}, fmt.Errorf("payment channel request failed: %w", err)
+		s.logger.Error("payment channel request failed", "bill_id", bill.ID, "channel_id", channel.ID, "provider", channel.Provider, "error", err)
+		return paymentResponse{}, providerError{cause: err}
 	}
-	payload, _ := json.Marshal(result.Raw)
+	payloadData := result.Raw
+	if payloadData == nil {
+		payloadData = map[string]any{}
+	}
+	if result.QRCode != "" {
+		payloadData["checkout_qrcode"] = result.QRCode
+	}
+	if result.PayURL != "" {
+		payloadData["checkout_pay_url"] = result.PayURL
+	}
+	payload, _ := json.Marshal(payloadData)
 	err = s.db.DB().WithContext(ctx).Model(&Bill{}).Where("id = ?", bill.ID).Updates(map[string]any{"provider_transaction_id": nullableString(result.ProviderTransactionID), "provider_payload": string(payload)}).Error
 	if err != nil {
 		return paymentResponse{}, err
@@ -255,6 +310,7 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 	response.Data.MerchantOrderNo = bill.MerchantOrderNo
 	response.Data.PayURL = result.PayURL
 	response.Data.QRCode = result.QRCode
+	response.Data.CheckoutURL = fmt.Sprintf("%s/checkout/%s", s.baseURL, bill.PlatformOrderNo)
 	response.Data.ExpiresAt = bill.ExpiresAt
 	return response, nil
 }
@@ -334,7 +390,56 @@ func (s *Service) publicQuery(w http.ResponseWriter, r *http.Request, input paym
 		writeError(w, 404, 40401, "order not found", requestID(r))
 		return
 	}
+	if bill.Status == "pending" && s.shouldPollBill(bill.ID) {
+		if updated, changed, pollErr := s.pollBill(r.Context(), bill); pollErr != nil {
+			s.logger.Warn("payment polling failed", "bill_id", bill.ID, "error", pollErr)
+		} else if changed {
+			bill = updated
+		}
+	}
 	writeJSON(w, 200, map[string]any{"code": 0, "message": "success", "data": billPublic(bill)})
+}
+
+func (s *Service) shouldPollBill(id uuid.UUID) bool {
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
+	if s.pollAt == nil {
+		s.pollAt = map[uuid.UUID]time.Time{}
+	}
+	now := time.Now()
+	if last, ok := s.pollAt[id]; ok && now.Sub(last) < 5*time.Second {
+		return false
+	}
+	s.pollAt[id] = now
+	return true
+}
+
+func (s *Service) pollBill(ctx context.Context, bill billRecord) (billRecord, bool, error) {
+	channel, err := s.channelByID(ctx, bill.ChannelID)
+	if err != nil {
+		return bill, false, err
+	}
+	status, err := s.queryPaymentStatus(ctx, channel, bill)
+	if err != nil {
+		return bill, false, err
+	}
+	if !status.Paid {
+		return bill, false, nil
+	}
+	raw, _ := json.Marshal(status.Raw)
+	paidAt := nowUTC()
+	result := s.db.DB().WithContext(ctx).Model(&Bill{}).Where("id = ? AND status = ?", bill.ID, "pending").Updates(map[string]any{"status": "paid", "provider_transaction_id": nullableString(status.TransactionID), "provider_payload": string(raw), "paid_at": paidAt})
+	if result.Error != nil {
+		return bill, false, result.Error
+	}
+	if result.RowsAffected == 0 {
+		current, err := s.billByID(ctx, bill.ID)
+		return current, false, err
+	}
+	bill.Status, bill.ProviderTransactionID, bill.PaidAt = "paid", status.TransactionID, &paidAt
+	s.audit(ctx, &bill.AccountID, nil, "bill.poll_paid", "bill", bill.ID.String(), "", map[string]any{"provider": bill.Provider})
+	go s.notifyMerchant(context.Background(), bill)
+	return bill, true, nil
 }
 
 func (s *Service) login(w http.ResponseWriter, r *http.Request) {
@@ -743,6 +848,8 @@ func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
 		}
 	case r.Method == "GET" && path == "/dashboard":
 		s.dashboard(w, r)
+	case r.Method == "GET" && path == "/developer-credentials":
+		s.getDeveloperCredentials(w, r)
 	case path == "/users":
 		if r.Method == "GET" {
 			s.listUsers(w, r)
@@ -773,6 +880,8 @@ func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
 		s.closeBill(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/bills/"), "/close"))
 	case strings.HasPrefix(path, "/bills/") && strings.HasSuffix(path, "/reconcile") && r.Method == "POST":
 		s.reconcileBill(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/bills/"), "/reconcile"))
+	case strings.HasPrefix(path, "/bills/") && strings.HasSuffix(path, "/notify") && r.Method == "POST":
+		s.retryMerchantCallback(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/bills/"), "/notify"))
 	case strings.HasPrefix(path, "/bills/") && r.Method == "GET":
 		s.getBill(w, r, strings.TrimPrefix(path, "/bills/"))
 	case path == "/refunds" && r.Method == "GET":
@@ -1371,6 +1480,31 @@ func (s *Service) dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"total_bills": stats.Total, "pending_bills": stats.Pending, "paid_bills": stats.Paid, "refunded_bills": stats.Refunded, "paid_volume": moneyString(stats.Volume)})
 }
+
+func (s *Service) getDeveloperCredentials(w http.ResponseWriter, r *http.Request) {
+	p := currentPrincipal(r)
+	if !canManagePayments(p) {
+		writeError(w, http.StatusForbidden, 40301, "payment operator role required", requestID(r))
+		return
+	}
+	accountID, ok := s.scopedAccount(w, r)
+	if !ok || accountID == nil {
+		return
+	}
+	var account Account
+	if err := s.db.DB().WithContext(r.Context()).Select("merchant_no", "api_secret_ciphertext").Take(&account, "id = ?", *accountID).Error; err != nil {
+		writeError(w, http.StatusNotFound, 40401, "account not found", requestID(r))
+		return
+	}
+	secret, err := s.decrypt(account.APISecretCiphertext)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot read merchant key", requestID(r))
+		return
+	}
+	s.audit(r.Context(), accountID, &p.UserID, "account.api_secret.view", "account", accountID.String(), requestID(r), nil)
+	writeJSON(w, http.StatusOK, map[string]string{"merchant_no": account.MerchantNo, "api_secret": secret})
+}
+
 func (s *Service) scopedAccount(w http.ResponseWriter, r *http.Request) (*uuid.UUID, bool) {
 	p := currentPrincipal(r)
 	if p.AccountID == nil {
@@ -1508,9 +1642,40 @@ func (s *Service) listChannels(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]map[string]any, 0)
 	for _, channel := range channels {
-		items = append(items, map[string]any{"id": channel.ID, "provider": channel.Provider, "display_name": channel.DisplayName, "priority": channel.Priority, "weight": channel.Weight, "enabled": channel.Enabled, "configured": channel.ConfigCiphertext != "", "webhook_url": fmt.Sprintf("%s/api/v1/webhooks/%s/%s", s.baseURL, channel.Provider, channel.WebhookToken), "updated_at": channel.UpdatedAt})
+		items = append(items, map[string]any{"id": channel.ID, "provider": channel.Provider, "display_name": channel.DisplayName, "priority": channel.Priority, "weight": channel.Weight, "enabled": channel.Enabled, "configured": channel.ConfigCiphertext != "", "config": s.publicChannelConfig(channel.ConfigCiphertext), "webhook_url": fmt.Sprintf("%s/api/v1/webhooks/%s/%s", s.baseURL, channel.Provider, channel.WebhookToken), "updated_at": channel.UpdatedAt})
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
+}
+
+// publicChannelConfig provides the values that are useful to edit but are not
+// credentials. Private keys and APIv3 keys must never be sent back to a browser.
+func (s *Service) publicChannelConfig(ciphertext string) map[string]any {
+	if ciphertext == "" {
+		return nil
+	}
+	plain, err := s.decrypt(ciphertext)
+	if err != nil {
+		return nil
+	}
+	var config providerConfig
+	if json.Unmarshal([]byte(plain), &config) != nil {
+		return nil
+	}
+	if config.Alipay != nil {
+		return map[string]any{"alipay": map[string]any{
+			"app_id": config.Alipay.AppID, "alipay_public_key_pem": config.Alipay.AlipayPublicKeyPEM,
+			"gateway_url": config.Alipay.GatewayURL, "return_url": config.Alipay.ReturnURL,
+			"app_private_key_configured": config.Alipay.AppPrivateKeyPEM != "",
+		}}
+	}
+	if config.Wechat != nil {
+		return map[string]any{"wechat": map[string]any{
+			"mch_id": config.Wechat.MchID, "app_id": config.Wechat.AppID, "merchant_serial_no": config.Wechat.MerchantSerialNo,
+			"platform_public_key_pem": config.Wechat.PlatformPublicKeyPEM, "platform_serial_no": config.Wechat.PlatformSerialNo,
+			"merchant_private_key_configured": config.Wechat.MerchantPrivateKeyPEM != "", "api_v3_key_configured": config.Wechat.APIv3Key != "",
+		}}
+	}
+	return nil
 }
 func (s *Service) createChannel(w http.ResponseWriter, r *http.Request) {
 	p := currentPrincipal(r)
@@ -1617,11 +1782,35 @@ func (s *Service) patchChannel(w http.ResponseWriter, r *http.Request, idText st
 			writeError(w, 400, 40002, "invalid provider config", requestID(r))
 			return
 		}
+		if channel.ConfigCiphertext != "" {
+			plain, decryptErr := s.decrypt(channel.ConfigCiphertext)
+			if decryptErr != nil {
+				writeError(w, 500, 50001, "cannot read stored channel config", requestID(r))
+				return
+			}
+			var stored providerConfig
+			if err = json.Unmarshal([]byte(plain), &stored); err != nil {
+				writeError(w, 500, 50001, "stored channel config is invalid", requestID(r))
+				return
+			}
+			config = mergeProviderConfig(channel.Provider, stored, config)
+		}
 		if err = validateProviderConfig(channel.Provider, config); err != nil {
 			writeError(w, 400, 40002, err.Error(), requestID(r))
 			return
 		}
-		encrypted, err := s.encrypt(string(input.Config))
+		if channel.Provider == "wechat" && config.Wechat.PlatformPublicKeyPEM == "" {
+			if err = s.fetchWechatPlatformCertificate(r.Context(), config.Wechat); err != nil {
+				writeError(w, http.StatusBadGateway, 50201, "无法自动获取微信支付平台证书。若商户已启用微信支付公钥，请在商户平台的账户中心 - API安全申请并下载公钥，填写公钥 PEM 与公钥 ID："+err.Error(), requestID(r))
+				return
+			}
+		}
+		encoded, err := json.Marshal(config)
+		if err != nil {
+			writeError(w, 500, 50001, "cannot encode channel config", requestID(r))
+			return
+		}
+		encrypted, err := s.encrypt(string(encoded))
 		if err != nil {
 			writeError(w, 500, 50001, "cannot secure channel config", requestID(r))
 			return
@@ -1646,6 +1835,38 @@ func (s *Service) patchChannel(w http.ResponseWriter, r *http.Request, idText st
 	}
 	s.audit(r.Context(), &channel.AccountID, &p.UserID, "channel.update", "payment_channel", channelID.String(), requestID(r), map[string]any{"provider": channel.Provider, "config_updated": input.Config != nil, "enabled": input.Enabled})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func mergeProviderConfig(provider string, stored, input providerConfig) providerConfig {
+	if provider == "alipay" && input.Alipay != nil {
+		if stored.Alipay == nil {
+			stored.Alipay = &alipayConfig{}
+		}
+		mergeString(&stored.Alipay.AppID, input.Alipay.AppID)
+		mergeString(&stored.Alipay.AppPrivateKeyPEM, input.Alipay.AppPrivateKeyPEM)
+		mergeString(&stored.Alipay.AlipayPublicKeyPEM, input.Alipay.AlipayPublicKeyPEM)
+		mergeString(&stored.Alipay.GatewayURL, input.Alipay.GatewayURL)
+		mergeString(&stored.Alipay.ReturnURL, input.Alipay.ReturnURL)
+	}
+	if provider == "wechat" && input.Wechat != nil {
+		if stored.Wechat == nil {
+			stored.Wechat = &wechatConfig{}
+		}
+		mergeString(&stored.Wechat.MchID, input.Wechat.MchID)
+		mergeString(&stored.Wechat.AppID, input.Wechat.AppID)
+		mergeString(&stored.Wechat.MerchantSerialNo, input.Wechat.MerchantSerialNo)
+		mergeString(&stored.Wechat.MerchantPrivateKeyPEM, input.Wechat.MerchantPrivateKeyPEM)
+		mergeString(&stored.Wechat.APIv3Key, input.Wechat.APIv3Key)
+		mergeString(&stored.Wechat.PlatformPublicKeyPEM, input.Wechat.PlatformPublicKeyPEM)
+		mergeString(&stored.Wechat.PlatformSerialNo, input.Wechat.PlatformSerialNo)
+	}
+	return stored
+}
+
+func mergeString(target *string, update string) {
+	if update != "" {
+		*target = update
+	}
 }
 
 func (s *Service) deleteChannel(w http.ResponseWriter, r *http.Request, idText string) {
@@ -1889,6 +2110,36 @@ func (s *Service) reconcileBill(w http.ResponseWriter, r *http.Request, billText
 	go s.notifyMerchant(context.Background(), bill)
 	writeJSON(w, http.StatusOK, map[string]any{"data": billPublic(bill)})
 }
+
+func (s *Service) retryMerchantCallback(w http.ResponseWriter, r *http.Request, billText string) {
+	p := currentPrincipal(r)
+	if !canManagePayments(p) {
+		writeError(w, http.StatusForbidden, 40301, "payment operator role required", requestID(r))
+		return
+	}
+	id, err := uuid.Parse(billText)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, 40002, "invalid bill id", requestID(r))
+		return
+	}
+	bill, err := s.billByID(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, 40401, "bill not found", requestID(r))
+		return
+	}
+	if !s.mayAccessAccount(p, bill.AccountID) {
+		writeError(w, http.StatusForbidden, 40301, "account access denied", requestID(r))
+		return
+	}
+	if bill.Status != "paid" {
+		writeError(w, http.StatusConflict, 40002, "only paid bill callback can be retried", requestID(r))
+		return
+	}
+	s.audit(r.Context(), &bill.AccountID, &p.UserID, "bill.callback_retry", "bill", bill.ID.String(), requestID(r), map[string]any{})
+	go s.notifyMerchant(context.Background(), bill)
+	w.WriteHeader(http.StatusAccepted)
+}
+
 func (s *Service) listRefunds(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := s.scopedAccount(w, r)
 	if !ok {
@@ -2028,28 +2279,63 @@ func (s *Service) notifyMerchant(ctx context.Context, bill billRecord) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	var account Account
-	if err := s.db.DB().WithContext(ctx).Select("callback_secret_ciphertext").Take(&account, "id = ?", bill.AccountID).Error; err != nil {
+	if err := s.db.DB().WithContext(ctx).Select("api_secret_ciphertext").Take(&account, "id = ?", bill.AccountID).Error; err != nil {
+		s.logger.Warn("merchant callback cannot load account", "bill_id", bill.ID, "error", err)
 		return
 	}
-	secret, err := s.decrypt(account.CallbackSecretCiphertext)
+	// EasyPay-compatible notifications use the same merchant key as payment requests.
+	secret, err := s.decrypt(account.APISecretCiphertext)
 	if err != nil {
+		s.logger.Error("merchant callback cannot decrypt key", "bill_id", bill.ID, "error", err)
 		return
 	}
-	values := url.Values{"pid": {s.merchantNo(ctx, bill.AccountID)}, "type": {providerOPSCode(bill.Provider)}, "out_trade_no": {bill.MerchantOrderNo}, "trade_no": {bill.ProviderTransactionID}, "name": {bill.Subject}, "money": {moneyString(bill.AmountMinor)}, "trade_status": {"TRADE_SUCCESS"}, "param": {bill.Metadata}, "sign_type": {"HMAC-SHA256"}}
-	values.Set("sign", signHMAC(canonicalValues(values), secret))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, bill.NotifyURL, strings.NewReader(values.Encode()))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	values := url.Values{"pid": {s.merchantNo(ctx, bill.AccountID)}, "type": {providerOPSCode(bill.Provider)}, "out_trade_no": {bill.MerchantOrderNo}, "trade_no": {bill.ProviderTransactionID}, "name": {bill.Subject}, "money": {moneyString(bill.AmountMinor)}, "trade_status": {"TRADE_SUCCESS"}, "param": {bill.Metadata}, "sign_type": {"MD5"}}
+	signature, _ := signOPS(canonicalSignatureValues(values), secret, "MD5")
+	values.Set("sign", signature)
 	client := s.httpClient
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
-	resp, err := client.Do(req)
-	if err == nil && resp != nil {
-		_ = resp.Body.Close()
+	var lastErr error
+	statusCode := 0
+	for attempt := 1; attempt <= 3; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, bill.NotifyURL, strings.NewReader(values.Encode()))
+		if err != nil {
+			lastErr = err
+			break
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err := client.Do(req)
+		if err == nil && resp != nil {
+			statusCode = resp.StatusCode
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+			_ = resp.Body.Close()
+			if statusCode/100 == 2 {
+				s.logger.Info("merchant callback delivered", "bill_id", bill.ID, "attempt", attempt, "status", statusCode)
+				s.audit(ctx, &bill.AccountID, nil, "merchant.callback.delivered", "bill", bill.ID.String(), "", map[string]any{"attempt": attempt, "status": statusCode})
+				return
+			}
+			lastErr = fmt.Errorf("merchant callback responded with HTTP %d", statusCode)
+		} else {
+			lastErr = err
+		}
+		if attempt < 3 {
+			select {
+			case <-ctx.Done():
+				attempt = 3
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+		}
 	}
+	s.logger.Warn("merchant callback failed", "bill_id", bill.ID, "status", statusCode, "error", lastErr)
+	s.audit(ctx, &bill.AccountID, nil, "merchant.callback.failed", "bill", bill.ID.String(), "", map[string]any{"attempts": 3, "status": statusCode, "error": errorMessage(lastErr)})
+}
+
+func errorMessage(err error) string {
+	if err == nil {
+		return "unknown callback failure"
+	}
+	return err.Error()
 }
 func (s *Service) merchantNo(ctx context.Context, accountID uuid.UUID) string {
 	var account Account
@@ -2168,7 +2454,7 @@ func (in *paymentInput) normalize() {
 }
 func (in paymentInput) value(_ string) string { return "" }
 func inputFromValues(values url.Values) paymentInput {
-	return paymentInput{MerchantID: first(values, "merchant_id", "pid", "mch_id"), PaymentMethod: first(values, "payment_method", "type"), MerchantOrderNo: first(values, "merchant_order_no", "out_trade_no"), Subject: first(values, "subject", "name"), Description: values.Get("description"), Amount: first(values, "amount", "money"), NotifyURL: values.Get("notify_url"), ReturnURL: values.Get("return_url"), Metadata: first(values, "metadata", "param"), Scene: first(values, "scene", "device"), SignType: values.Get("sign_type"), Sign: values.Get("sign")}
+	return paymentInput{MerchantID: first(values, "merchant_id", "pid", "mch_id"), PaymentMethod: first(values, "payment_method", "type"), MerchantOrderNo: first(values, "merchant_order_no", "out_trade_no"), Subject: first(values, "subject", "name"), Description: values.Get("description"), Amount: first(values, "amount", "money"), NotifyURL: values.Get("notify_url"), ReturnURL: values.Get("return_url"), Metadata: first(values, "metadata", "param"), Scene: first(values, "scene", "device"), SignType: values.Get("sign_type"), Sign: values.Get("sign"), signatureValues: values}
 }
 func first(values url.Values, keys ...string) string {
 	for _, key := range keys {
@@ -2179,25 +2465,53 @@ func first(values url.Values, keys ...string) string {
 	return ""
 }
 func verifyOPSSignature(input paymentInput, secret string) error {
+	legacyValues := url.Values{"pid": {input.MerchantID}, "type": {providerOPSCode(input.PaymentMethod)}, "out_trade_no": {input.MerchantOrderNo}, "name": {input.Subject}, "money": {input.Amount}, "notify_url": {input.NotifyURL}, "return_url": {input.ReturnURL}, "param": {input.Metadata}, "device": {input.Scene}}
+	modernValues := url.Values{"merchant_id": {input.MerchantID}, "payment_method": {input.PaymentMethod}, "merchant_order_no": {input.MerchantOrderNo}, "subject": {input.Subject}, "description": {input.Description}, "amount": {input.Amount}, "notify_url": {input.NotifyURL}, "return_url": {input.ReturnURL}, "metadata": {input.Metadata}, "scene": {input.Scene}}
+	algorithms := []string{strings.ToUpper(input.SignType)}
 	if input.SignType == "" {
-		input.SignType = "HMAC-SHA256"
+		// Existing EasyPay clients often omit sign_type and use MD5, while OPS
+		// clients use HMAC-SHA256. Both are deterministic with the same key.
+		algorithms = []string{"MD5", "HMAC-SHA256"}
 	}
-	values := url.Values{"pid": {input.MerchantID}, "type": {providerOPSCode(input.PaymentMethod)}, "out_trade_no": {input.MerchantOrderNo}, "name": {input.Subject}, "money": {input.Amount}, "notify_url": {input.NotifyURL}, "return_url": {input.ReturnURL}, "param": {input.Metadata}}
-	canonical := canonicalValues(values)
-	var expected string
-	switch strings.ToUpper(input.SignType) {
+	canonicals := []string{canonicalValues(legacyValues), canonicalValues(modernValues)}
+	if len(input.signatureValues) > 0 {
+		canonicals = append(canonicals, canonicalSignatureValues(input.signatureValues))
+	}
+	for _, algorithm := range algorithms {
+		for _, canonical := range canonicals {
+			expected, err := signOPS(canonical, secret, algorithm)
+			if err != nil {
+				return err
+			}
+			if hmac.Equal([]byte(strings.ToLower(expected)), []byte(strings.ToLower(input.Sign))) {
+				return nil
+			}
+		}
+	}
+	return errors.New("signature mismatch")
+}
+
+func canonicalSignatureValues(values url.Values) string {
+	filtered := make(url.Values, len(values))
+	for key, raw := range values {
+		if key == "sign" || key == "sign_type" || len(raw) == 0 || raw[0] == "" {
+			continue
+		}
+		filtered[key] = raw
+	}
+	return canonicalValues(filtered)
+}
+
+func signOPS(canonical, secret, signType string) (string, error) {
+	switch signType {
 	case "MD5":
 		sum := md5.Sum([]byte(canonical + secret))
-		expected = hex.EncodeToString(sum[:])
+		return hex.EncodeToString(sum[:]), nil
 	case "HMAC-SHA256":
-		expected = signHMAC(canonical, secret)
+		return signHMAC(canonical, secret), nil
 	default:
-		return errors.New("unsupported sign type")
+		return "", errors.New("unsupported sign type")
 	}
-	if !hmac.Equal([]byte(strings.ToLower(expected)), []byte(strings.ToLower(input.Sign))) {
-		return errors.New("signature mismatch")
-	}
-	return nil
 }
 func signHMAC(message, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
@@ -2218,8 +2532,8 @@ func validateProviderConfig(provider string, config providerConfig) error {
 		return nil
 	}
 	if provider == "wechat" {
-		if config.Wechat == nil || config.Wechat.MchID == "" || config.Wechat.AppID == "" || config.Wechat.MerchantSerialNo == "" || config.Wechat.MerchantPrivateKeyPEM == "" || config.Wechat.APIv3Key == "" || config.Wechat.PlatformPublicKeyPEM == "" {
-			return errors.New("微信支付配置需要 mch_id、app_id、merchant_serial_no、merchant_private_key_pem、api_v3_key、platform_public_key_pem")
+		if config.Wechat == nil || config.Wechat.MchID == "" || config.Wechat.AppID == "" || config.Wechat.MerchantSerialNo == "" || config.Wechat.MerchantPrivateKeyPEM == "" || config.Wechat.APIv3Key == "" {
+			return errors.New("微信支付配置需要 mch_id、app_id、merchant_serial_no、merchant_private_key_pem、api_v3_key")
 		}
 		if len(config.Wechat.APIv3Key) != 32 {
 			return errors.New("微信 APIv3 密钥必须为 32 字节")
@@ -2235,10 +2549,24 @@ type clientError struct {
 }
 
 func (e clientError) Error() string { return e.Message }
+
+type providerError struct{ cause error }
+
+func (e providerError) Error() string { return e.cause.Error() }
+
 func writePublicError(w http.ResponseWriter, r *http.Request, err error) {
 	var ce clientError
 	if errors.As(err, &ce) {
 		writeError(w, 400, ce.Code, ce.Message, requestID(r))
+		return
+	}
+	var pe providerError
+	if errors.As(err, &pe) {
+		message := pe.Error()
+		if len(message) > 800 {
+			message = message[:800]
+		}
+		writeError(w, http.StatusBadGateway, 50001, message, requestID(r))
 		return
 	}
 	writeError(w, 502, 50001, "payment service unavailable", requestID(r))

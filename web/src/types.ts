@@ -15,6 +15,7 @@ export type Bill = {
   provider: string
   scene: string
   status: string
+  notify_url: string
   created_at: string
   paid_at?: string
 }
@@ -26,6 +27,24 @@ export type Channel = {
   weight: number
   enabled: boolean
   configured: boolean
+  config?: {
+    alipay?: {
+      app_id?: string
+      alipay_public_key_pem?: string
+      gateway_url?: string
+      return_url?: string
+      app_private_key_configured?: boolean
+    }
+    wechat?: {
+      mch_id?: string
+      app_id?: string
+      merchant_serial_no?: string
+      platform_public_key_pem?: string
+      platform_serial_no?: string
+      merchant_private_key_configured?: boolean
+      api_v3_key_configured?: boolean
+    }
+  }
   webhook_url: string
   updated_at: string
 }

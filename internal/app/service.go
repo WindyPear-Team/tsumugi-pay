@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -43,6 +44,8 @@ type Service struct {
 	bootstrapDemo bool
 	httpClient    *http.Client
 	logger        *slog.Logger
+	pollMu        sync.Mutex
+	pollAt        map[uuid.UUID]time.Time
 }
 
 type principal struct {
@@ -71,7 +74,7 @@ func New(cfg Config) (*Service, error) {
 	return &Service{
 		db: cfg.Database, jwtSecret: []byte(cfg.JWTSecret), cipher: gcm,
 		baseURL: cfg.PublicBaseURL, environment: cfg.Environment,
-		bootstrapDemo: cfg.BootstrapDemo, httpClient: cfg.HTTPClient, logger: cfg.Logger,
+		bootstrapDemo: cfg.BootstrapDemo, httpClient: cfg.HTTPClient, logger: cfg.Logger, pollAt: map[uuid.UUID]time.Time{},
 	}, nil
 }
 
@@ -112,10 +115,12 @@ func (s *Service) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /.well-known/openpayment-configuation", s.discovery)
 	mux.HandleFunc("GET /.well-known/openpayment-configuration", s.discovery)
+	mux.HandleFunc("GET /submit.php", s.legacyCreate)
 	mux.HandleFunc("POST /submit.php", s.legacyCreate)
 	mux.HandleFunc("POST /mapi.php", s.publicCreate)
 	mux.HandleFunc("GET /api.php", s.legacyAPI)
 	mux.HandleFunc("POST /api.php", s.legacyAPI)
+	mux.HandleFunc("GET /api/v1/payments/{orderNo}", s.publicCheckout)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/auth/register", s.register)
 	mux.HandleFunc("GET /api/v1/auth/oidc/login", s.oidcLogin)

@@ -202,14 +202,23 @@ function AddChannel({ request, onClose, onSaved }: { request: ApiRequest; onClos
   )
 }
 function ChannelConfig({ channel, request, onClose, onSaved }: { channel: Channel; request: ApiRequest; onClose: () => void; onSaved: () => void }) {
+  const alipay = channel.provider === "alipay"
+  const publicValues = alipay
+    ? channel.config?.alipay || {}
+    : channel.config?.wechat || {}
   const [name, setName] = useState(channel.display_name)
   const [priority, setPriority] = useState(channel.priority)
   const [weight, setWeight] = useState(channel.weight)
   const [enabled, setEnabled] = useState(channel.enabled)
-  const [values, setValues] = useState<Record<string, string>>({})
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(Object.entries(publicValues).filter(([, value]) => typeof value === "string")) as Record<string, string>,
+  )
+  const [configTouched, setConfigTouched] = useState(false)
   const [error, setError] = useState("")
-  const set = (key: string, value: string) => setValues((current) => ({ ...current, [key]: value }))
-  const alipay = channel.provider === "alipay"
+  const set = (key: string, value: string) => {
+    setConfigTouched(true)
+    setValues((current) => ({ ...current, [key]: value }))
+  }
   async function save() {
     const config = alipay
       ? {
@@ -240,7 +249,7 @@ function ChannelConfig({ channel, request, onClose, onSaved }: { channel: Channe
           priority,
           weight,
           enabled,
-          ...(Object.keys(values).length ? { config } : {}),
+          ...(configTouched ? { config } : {}),
         }),
       })
       onSaved()
@@ -248,16 +257,16 @@ function ChannelConfig({ channel, request, onClose, onSaved }: { channel: Channe
       setError(err.message)
     }
   }
-  const field = (label: string, key: string, secret = false) => (
+  const field = (label: string, key: string, secret = false, configured = false) => (
     <Label className="form-label" key={key}>
-      {label}
-      <Input type={secret ? "password" : "text"} value={values[key] || ""} onChange={(event) => set(key, event.target.value)} />
+      {label}{configured ? "（已保存，留空不修改）" : ""}
+      <Input type={secret ? "password" : "text"} value={values[key] || ""} placeholder={configured ? "已保存；输入新值替换" : undefined} onChange={(event) => set(key, event.target.value)} />
     </Label>
   )
-  const pem = (label: string, key: string) => (
+  const pem = (label: string, key: string, configured = false) => (
     <Label className="form-label" key={key}>
-      {label}
-      <Textarea rows={4} value={values[key] || ""} onChange={(event) => set(key, event.target.value)} />
+      {label}{configured ? "（已保存，留空不修改）" : ""}
+      <Textarea rows={4} value={values[key] || ""} placeholder={configured ? "已保存；输入新值替换" : undefined} onChange={(event) => set(key, event.target.value)} />
     </Label>
   )
   return (
@@ -278,7 +287,7 @@ function ChannelConfig({ channel, request, onClose, onSaved }: { channel: Channe
       {alipay ? (
         <>
           {field("App ID", "app_id")}
-          {pem("应用私钥（PEM）", "app_private_key_pem")}
+          {pem("应用私钥（PEM）", "app_private_key_pem", channel.config?.alipay?.app_private_key_configured)}
           {pem("支付宝公钥（PEM）", "alipay_public_key_pem")}
           {field("网关地址（可选）", "gateway_url")}
           {field("同步跳转地址（可选）", "return_url")}
@@ -288,10 +297,11 @@ function ChannelConfig({ channel, request, onClose, onSaved }: { channel: Channe
           {field("微信支付商户号", "mch_id")}
           {field("应用 AppID", "app_id")}
           {field("商户证书序列号", "merchant_serial_no")}
-          {pem("商户私钥（PEM）", "merchant_private_key_pem")}
-          {field("API v3 密钥", "api_v3_key", true)}
-          {pem("平台公钥（PEM）", "platform_public_key_pem")}
-          {field("平台证书序列号（可选）", "platform_serial_no")}
+          {pem("商户私钥（PEM）", "merchant_private_key_pem", channel.config?.wechat?.merchant_private_key_configured)}
+          {field("API v3 密钥", "api_v3_key", true, channel.config?.wechat?.api_v3_key_configured)}
+          {pem("微信支付公钥（PEM）", "platform_public_key_pem")}
+          {field("微信支付公钥 ID（可选）", "platform_serial_no")}
+          <p className="modal-intro">公钥 ID 未提供时可留空，系统会直接用 PEM 验签。使用平台证书的旧商户可将两项留空，系统会自动获取证书。</p>
         </>
       )}
       <div className="webhook-copy">

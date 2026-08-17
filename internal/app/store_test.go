@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/google/uuid"
@@ -42,6 +43,73 @@ func TestSQLiteSchemaAndBootstrap(t *testing.T) {
 	}
 	if users != 1 || channels != 0 {
 		t.Fatalf("unexpected demo data: users=%d channels=%d", users, channels)
+	}
+}
+
+func TestSubmitEndpointAcceptsGET(t *testing.T) {
+	database, err := OpenDatabase("sqlite", "file:tsumugi_submit_get_test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	service, err := New(Config{Database: NewStore(database), JWTSecret: "test-secret", EncryptionKey: make([]byte, 32), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	response := httptest.NewRecorder()
+	service.Routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/submit.php", nil))
+	if response.Code == http.StatusMethodNotAllowed {
+		t.Fatalf("GET /submit.php should be accepted, got %d %s", response.Code, response.Body.String())
+	}
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("GET /submit.php without payment parameters should be rejected as bad request, got %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestMerchantCallbackUsesAPISecret(t *testing.T) {
+	database, err := OpenDatabase("sqlite", "file:tsumugi_callback_key_test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	store := NewStore(database)
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate sqlite: %v", err)
+	}
+	var received url.Values
+	callback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse callback: %v", err)
+		}
+		received = r.PostForm
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer callback.Close()
+	service, err := New(Config{Database: store, JWTSecret: "test-secret", EncryptionKey: make([]byte, 32), HTTPClient: callback.Client(), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	apiSecret, err := service.encrypt("merchant-api-key")
+	if err != nil {
+		t.Fatalf("encrypt API key: %v", err)
+	}
+	callbackSecret, err := service.encrypt("different-legacy-callback-key")
+	if err != nil {
+		t.Fatalf("encrypt callback key: %v", err)
+	}
+	accountID := uuid.New()
+	if err := store.DB().Create(&Account{ID: accountID, Name: "Callback Test", MerchantNo: "1000", APISecretCiphertext: apiSecret, CallbackSecretCiphertext: callbackSecret}).Error; err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	bill := billRecord{ID: uuid.New(), AccountID: accountID, MerchantOrderNo: "ORDER-CALLBACK-1", Subject: "Callback test", AmountMinor: 100, Provider: "alipay", ProviderTransactionID: "TRADE-1", NotifyURL: callback.URL}
+	service.notifyMerchant(context.Background(), bill)
+	if received == nil {
+		t.Fatal("merchant callback was not sent")
+	}
+	want, err := signOPS(canonicalSignatureValues(received), "merchant-api-key", "MD5")
+	if err != nil {
+		t.Fatalf("sign expected callback: %v", err)
+	}
+	if received.Get("sign") != want {
+		t.Fatalf("callback signature = %q, want API-key signature %q", received.Get("sign"), want)
 	}
 }
 
@@ -146,6 +214,14 @@ func TestOOBECreatesInitialUserOnce(t *testing.T) {
 	if setup.Code != http.StatusCreated {
 		t.Fatalf("initialize setup: %d %s", setup.Code, setup.Body.String())
 	}
+	var setupResponse struct {
+		Credentials struct {
+			APISecret string `json:"api_secret"`
+		} `json:"credentials"`
+	}
+	if err := json.Unmarshal(setup.Body.Bytes(), &setupResponse); err != nil || setupResponse.Credentials.APISecret == "" {
+		t.Fatalf("decode setup credentials: %v %s", err, setup.Body.String())
+	}
 	if !bytes.Contains(setup.Body.Bytes(), []byte(`"merchant_no":"1000"`)) {
 		t.Fatalf("initial merchant number should start at 1000: %s", setup.Body.String())
 	}
@@ -164,6 +240,13 @@ func TestOOBECreatesInitialUserOnce(t *testing.T) {
 	}
 	if err := json.Unmarshal(login.Body.Bytes(), &loginResponse); err != nil {
 		t.Fatalf("decode login response: %v", err)
+	}
+	credentialsRequest := httptest.NewRequest(http.MethodGet, "/api/v1/admin/developer-credentials", nil)
+	credentialsRequest.Header.Set("Authorization", "Bearer "+loginResponse.AccessToken)
+	credentials := httptest.NewRecorder()
+	handler.ServeHTTP(credentials, credentialsRequest)
+	if credentials.Code != http.StatusOK || !bytes.Contains(credentials.Body.Bytes(), []byte(setupResponse.Credentials.APISecret)) {
+		t.Fatalf("developer credentials should reveal the current account key: %d %s", credentials.Code, credentials.Body.String())
 	}
 	channelPayload := bytes.NewBufferString(`{"provider":"alipay","display_name":"支付宝"}`)
 	channelRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/channels", channelPayload)

@@ -65,6 +65,12 @@ type providerResult struct {
 	Raw                   map[string]any
 }
 
+type providerPaymentStatus struct {
+	Paid          bool
+	TransactionID string
+	Raw           map[string]any
+}
+
 type webhookResult struct {
 	EventKey        string
 	ProviderTradeID string
@@ -125,6 +131,17 @@ func (s *Service) closePayment(ctx context.Context, channel channelRecord, bill 
 		return s.wechatClose(ctx, channel, bill)
 	default:
 		return errors.New("unsupported provider")
+	}
+}
+
+func (s *Service) queryPaymentStatus(ctx context.Context, channel channelRecord, bill billRecord) (providerPaymentStatus, error) {
+	switch channel.Provider {
+	case "alipay":
+		return s.alipayQuery(ctx, channel, bill)
+	case "wechat":
+		return s.wechatQuery(ctx, channel, bill)
+	default:
+		return providerPaymentStatus{}, errors.New("unsupported provider")
 	}
 }
 
@@ -197,6 +214,20 @@ func (s *Service) alipayClose(ctx context.Context, channel channelRecord, bill b
 	biz, _ := json.Marshal(map[string]any{"out_trade_no": bill.MerchantOrderNo})
 	_, err := s.alipayCall(ctx, cfg, "alipay.trade.close", string(biz))
 	return err
+}
+func (s *Service) alipayQuery(ctx context.Context, channel channelRecord, bill billRecord) (providerPaymentStatus, error) {
+	cfg := channel.Config.Alipay
+	if cfg == nil {
+		return providerPaymentStatus{}, errors.New("支付宝通道未配置")
+	}
+	biz, _ := json.Marshal(map[string]string{"out_trade_no": bill.MerchantOrderNo})
+	response, err := s.alipayCall(ctx, cfg, "alipay.trade.query", string(biz))
+	if err != nil {
+		return providerPaymentStatus{}, err
+	}
+	tradeID, _ := response["trade_no"].(string)
+	tradeStatus, _ := response["trade_status"].(string)
+	return providerPaymentStatus{Paid: tradeStatus == "TRADE_SUCCESS" || tradeStatus == "TRADE_FINISHED", TransactionID: tradeID, Raw: response}, nil
 }
 func (s *Service) alipayCall(ctx context.Context, cfg *alipayConfig, method, biz string) (map[string]any, error) {
 	params := url.Values{"app_id": {cfg.AppID}, "method": {method}, "format": {"JSON"}, "charset": {"utf-8"}, "sign_type": {"RSA2"}, "timestamp": {time.Now().Format("2006-01-02 15:04:05")}, "version": {"1.0"}, "biz_content": {biz}}
@@ -334,6 +365,24 @@ func (s *Service) wechatClose(ctx context.Context, channel channelRecord, bill b
 	_, err := s.wechatCall(ctx, cfg, http.MethodPost, "/v3/pay/transactions/out-trade-no/"+url.PathEscape(bill.MerchantOrderNo)+"/close", []byte(`{"mchid":"`+cfg.MchID+`"}`))
 	return err
 }
+func (s *Service) wechatQuery(ctx context.Context, channel channelRecord, bill billRecord) (providerPaymentStatus, error) {
+	cfg := channel.Config.Wechat
+	if cfg == nil {
+		return providerPaymentStatus{}, errors.New("微信支付通道未配置")
+	}
+	path := "/v3/pay/transactions/out-trade-no/" + url.PathEscape(bill.MerchantOrderNo) + "?mchid=" + url.QueryEscape(cfg.MchID)
+	response, err := s.wechatCall(ctx, cfg, http.MethodGet, path, nil)
+	if err != nil {
+		return providerPaymentStatus{}, err
+	}
+	var data map[string]any
+	if err := json.Unmarshal(response, &data); err != nil {
+		return providerPaymentStatus{}, err
+	}
+	tradeID, _ := data["transaction_id"].(string)
+	tradeState, _ := data["trade_state"].(string)
+	return providerPaymentStatus{Paid: tradeState == "SUCCESS", TransactionID: tradeID, Raw: data}, nil
+}
 func (s *Service) wechatCall(ctx context.Context, cfg *wechatConfig, method, path string, body []byte) ([]byte, error) {
 	timestamp := fmt.Sprint(time.Now().Unix())
 	nonce := randomToken(16)
@@ -364,6 +413,63 @@ func (s *Service) wechatCall(ctx context.Context, cfg *wechatConfig, method, pat
 	}
 	return response, nil
 }
+
+// fetchWechatPlatformCertificate obtains the active platform certificate with
+// the merchant's signed API request, then stores its public key for webhook
+// signature verification. The certificate payload is encrypted with APIv3Key.
+func (s *Service) fetchWechatPlatformCertificate(ctx context.Context, cfg *wechatConfig) error {
+	response, err := s.wechatCall(ctx, cfg, http.MethodGet, "/v3/certificates", nil)
+	if err != nil {
+		return err
+	}
+	var payload struct {
+		Certificates []struct {
+			SerialNo           string    `json:"serial_no"`
+			EffectiveTime      time.Time `json:"effective_time"`
+			ExpireTime         time.Time `json:"expire_time"`
+			EncryptCertificate struct {
+				Algorithm      string `json:"algorithm"`
+				Nonce          string `json:"nonce"`
+				AssociatedData string `json:"associated_data"`
+				Ciphertext     string `json:"ciphertext"`
+			} `json:"encrypt_certificate"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response, &payload); err != nil {
+		return fmt.Errorf("decode platform certificates: %w", err)
+	}
+	now := time.Now()
+	for _, item := range payload.Certificates {
+		if item.EncryptCertificate.Algorithm != "AEAD_AES_256_GCM" || item.SerialNo == "" || now.Before(item.EffectiveTime) || !now.Before(item.ExpireTime) {
+			continue
+		}
+		certificatePEM, err := wechatDecrypt(cfg.APIv3Key, item.EncryptCertificate.Nonce, item.EncryptCertificate.AssociatedData, item.EncryptCertificate.Ciphertext)
+		if err != nil {
+			return fmt.Errorf("decrypt platform certificate: %w", err)
+		}
+		block, _ := pem.Decode(certificatePEM)
+		if block == nil {
+			return errors.New("platform certificate is not PEM")
+		}
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("parse platform certificate: %w", err)
+		}
+		publicKey, ok := certificate.PublicKey.(*rsa.PublicKey)
+		if !ok {
+			return errors.New("platform certificate does not contain an RSA public key")
+		}
+		der, err := x509.MarshalPKIXPublicKey(publicKey)
+		if err != nil {
+			return fmt.Errorf("encode platform public key: %w", err)
+		}
+		cfg.PlatformPublicKeyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+		cfg.PlatformSerialNo = item.SerialNo
+		return nil
+	}
+	return errors.New("no active WeChat Pay platform certificate returned")
+}
+
 func (s *Service) verifyWechatWebhook(channel channelRecord, headers http.Header, body []byte) (webhookResult, error) {
 	cfg := channel.Config.Wechat
 	if cfg == nil || cfg.PlatformPublicKeyPEM == "" || cfg.APIv3Key == "" {
@@ -374,6 +480,9 @@ func (s *Service) verifyWechatWebhook(channel channelRecord, headers http.Header
 	signature := headers.Get("Wechatpay-Signature")
 	if timestamp == "" || nonce == "" || signature == "" {
 		return webhookResult{}, errors.New("missing Wechatpay signature headers")
+	}
+	if keyID := headers.Get("Wechatpay-Serial"); cfg.PlatformSerialNo != "" && keyID != "" && !strings.EqualFold(keyID, cfg.PlatformSerialNo) {
+		return webhookResult{}, errors.New("Wechatpay platform certificate or public key ID does not match configured value")
 	}
 	message := timestamp + "\n" + nonce + "\n" + string(body) + "\n"
 	if err := rsaVerifyBytes(cfg.PlatformPublicKeyPEM, []byte(message), signature); err != nil {

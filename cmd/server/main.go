@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	// Local development commonly keeps credentials in .env. Load it without
 	// replacing values explicitly supplied by the shell or deployment runtime.
 	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {

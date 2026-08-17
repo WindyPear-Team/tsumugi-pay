@@ -10,6 +10,7 @@ import { LoginPage, SetupPage } from "@/pages/AuthPages"
 import { DashboardPage } from "@/pages/DashboardPage"
 import { BillsPage } from "@/pages/BillsPage"
 import { ChannelsPage } from "@/pages/ChannelsPage"
+import { CheckoutPage } from "@/pages/CheckoutPage"
 import type { ApiRequest, AuditLog, Bill, Channel, Dashboard, Refund, SiteSettings, PublicSiteConfig, ManagedUser, Account, View } from "@/types"
 
 const viewPaths: Record<View, string> = {
@@ -154,6 +155,9 @@ export default function App() {
   useEffect(() => {
     loadPage()
   }, [view, token])
+  if (location.pathname.startsWith("/checkout/")) {
+    return <CheckoutPage orderNo={decodeURIComponent(location.pathname.slice("/checkout/".length))} siteName={siteConfig?.site_name || "Tsumugi Pay"} />
+  }
   if (!token && setupRequired === null)
     return (
       <div className="login-page">
@@ -264,7 +268,7 @@ export default function App() {
           <Route path="/refunds" element={<RefundsPage data={refunds} />} />
           <Route path="/channels" element={<ChannelsPage data={channels} account={activeAccount} canManage={canManagePayments || isPlatformAdmin} request={request} onRefresh={loadPage} />} />
           <Route path="/audit-logs" element={<AuditPage data={auditLogs} />} />
-          <Route path="/developers" element={<DevelopersPage account={activeAccount} />} />
+          <Route path="/developers" element={<DevelopersPage account={activeAccount} request={request} />} />
           <Route path="/profile" element={<ProfilePage user={user} request={request} onSaved={setUser} />} />
           <Route path="/users" element={isPlatformAdmin ? <UsersPage data={managedUsers} request={request} onRefresh={loadPage} /> : <Navigate to="/" replace />} />
           <Route

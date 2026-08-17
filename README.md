@@ -96,7 +96,7 @@ yarn dev
 | --- | --- | --- |
 | `GET` | `/.well-known/openpayment-configuation` | OPS 发现配置。 |
 | `GET` | `/.well-known/openpayment-configuration` | 发现配置别名。 |
-| `POST` | `/submit.php` | 传统表单下单，成功后跳转收银台。 |
+| `GET` / `POST` | `/submit.php` | 传统表单下单，成功后跳转收银台。 |
 | `POST` | `/mapi.php` | JSON 接口下单。 |
 | `GET` / `POST` | `/api.php?act=order` | 订单查询。 |
 | `POST` | `/api/v1/webhooks/alipay/:token` | 支付宝异步通知接收与 RSA2 验签。 |
@@ -152,8 +152,8 @@ yarn dev
     "merchant_serial_no": "商户 API 证书序列号",
     "merchant_private_key_pem": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
     "api_v3_key": "32-byte-api-v3-key",
-    "platform_public_key_pem": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----",
-    "platform_serial_no": "微信支付平台证书或公钥序列号"
+    "platform_public_key_pem": "-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----",
+    "platform_serial_no": "微信支付平台证书序列号或公钥 ID（可选）"
   }
 }
 ```
