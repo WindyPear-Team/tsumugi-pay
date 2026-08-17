@@ -11,7 +11,7 @@ import (
 type Account struct {
 	ID                       uuid.UUID `gorm:"type:char(36);primaryKey"`
 	Name                     string    `gorm:"size:120;not null"`
-	MerchantNo               string    `gorm:"size:64;uniqueIndex;not null"`
+	MerchantNo               string    `gorm:"size:64;unique;not null"`
 	Status                   string    `gorm:"size:16;not null;default:active"`
 	APISecretCiphertext      string    `gorm:"type:text;not null"`
 	CallbackSecretCiphertext string    `gorm:"type:text;not null"`
@@ -24,7 +24,7 @@ type User struct {
 	ID           uuid.UUID  `gorm:"type:char(36);primaryKey"`
 	AccountID    *uuid.UUID `gorm:"type:char(36);uniqueIndex"`
 	Account      *Account   `gorm:"constraint:OnDelete:CASCADE"`
-	Email        string     `gorm:"size:255;uniqueIndex;not null"`
+	Email        string     `gorm:"size:255;unique;not null"`
 	PasswordHash string     `gorm:"type:text;not null"`
 	DisplayName  string     `gorm:"size:120;not null"`
 	Role         string     `gorm:"size:32;not null"`
@@ -43,19 +43,19 @@ type PaymentChannel struct {
 	Weight           int       `gorm:"not null;default:100"`
 	Enabled          bool      `gorm:"not null;default:false;index:idx_channels_dispatch,priority:2"`
 	ConfigCiphertext string    `gorm:"type:text;not null;default:''"`
-	WebhookToken     string    `gorm:"size:80;uniqueIndex;not null"`
+	WebhookToken     string    `gorm:"size:80;unique;not null"`
 	CreatedAt        time.Time `gorm:"index:idx_channels_dispatch,priority:4"`
 	UpdatedAt        time.Time
 }
 
 type Bill struct {
 	ID                    uuid.UUID `gorm:"type:char(36);primaryKey"`
-	AccountID             uuid.UUID `gorm:"type:char(36);not null;uniqueIndex:idx_account_merchant_order;index:idx_bills_account_created,priority:1;index:idx_bills_account_status,priority:1"`
+	AccountID             uuid.UUID `gorm:"type:char(36);not null;uniqueIndex:bills_account_id_merchant_order_no_key;index:idx_bills_account_created,priority:1;index:idx_bills_account_status,priority:1"`
 	Account               Account   `gorm:"constraint:OnDelete:CASCADE"`
 	ChannelID             uuid.UUID `gorm:"type:char(36);not null"`
 	Channel               PaymentChannel
-	PlatformOrderNo       string  `gorm:"size:64;uniqueIndex;not null"`
-	MerchantOrderNo       string  `gorm:"size:128;not null;uniqueIndex:idx_account_merchant_order"`
+	PlatformOrderNo       string  `gorm:"size:64;unique;not null"`
+	MerchantOrderNo       string  `gorm:"size:128;not null;uniqueIndex:bills_account_id_merchant_order_no_key"`
 	Subject               string  `gorm:"size:256;not null"`
 	Description           string  `gorm:"size:512;not null;default:''"`
 	AmountMinor           int64   `gorm:"not null"`
@@ -77,11 +77,11 @@ type Bill struct {
 
 type Refund struct {
 	ID               uuid.UUID `gorm:"type:char(36);primaryKey"`
-	AccountID        uuid.UUID `gorm:"type:char(36);not null;uniqueIndex:idx_account_refund"`
+	AccountID        uuid.UUID `gorm:"type:char(36);not null;uniqueIndex:refunds_account_id_refund_order_no_key"`
 	Account          Account   `gorm:"constraint:OnDelete:CASCADE"`
 	BillID           uuid.UUID `gorm:"type:char(36);not null;index:idx_refunds_bill_created,priority:1"`
 	Bill             Bill
-	RefundOrderNo    string    `gorm:"size:128;not null;uniqueIndex:idx_account_refund"`
+	RefundOrderNo    string    `gorm:"size:128;not null;uniqueIndex:refunds_account_id_refund_order_no_key"`
 	AmountMinor      int64     `gorm:"not null"`
 	Reason           string    `gorm:"size:256;not null;default:''"`
 	Status           string    `gorm:"size:16;not null;default:pending"`
@@ -94,10 +94,10 @@ type WebhookEvent struct {
 	ID          uuid.UUID `gorm:"type:char(36);primaryKey"`
 	AccountID   uuid.UUID `gorm:"type:char(36);not null"`
 	Account     Account   `gorm:"constraint:OnDelete:CASCADE"`
-	ChannelID   uuid.UUID `gorm:"type:char(36);not null;uniqueIndex:idx_channel_event;index:idx_webhook_events_channel_created,priority:1"`
+	ChannelID   uuid.UUID `gorm:"type:char(36);not null;uniqueIndex:webhook_events_channel_id_event_key_key;index:idx_webhook_events_channel_created,priority:1"`
 	Channel     PaymentChannel
 	Provider    string `gorm:"size:16;not null"`
-	EventKey    string `gorm:"size:200;not null;uniqueIndex:idx_channel_event"`
+	EventKey    string `gorm:"size:200;not null;uniqueIndex:webhook_events_channel_id_event_key_key"`
 	Verified    bool   `gorm:"not null;default:false"`
 	Payload     string `gorm:"type:text;not null"`
 	ProcessedAt *time.Time
