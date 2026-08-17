@@ -1,4 +1,4 @@
-export type View = "overview" | "bills" | "refunds" | "channels" | "users" | "audit" | "developers" | "settings"
+export type View = "overview" | "bills" | "refunds" | "channels" | "audit" | "developers" | "settings"
 export type Tenant = { id: string; name: string; merchant_no: string; status: string; created_at?: string }
 export type Bill = { id: string; platform_order_no: string; merchant_order_no: string; subject: string; amount: string; provider: string; scene: string; status: string; created_at: string; paid_at?: string }
 export type Channel = { id: string; provider: string; display_name: string; enabled: boolean; configured: boolean; webhook_url: string; updated_at: string }

@@ -384,7 +384,7 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, 40006, "merchant number already exists", requestID(r))
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `INSERT INTO users (id,tenant_id,email,password_hash,display_name,role) VALUES ($1,$2,$3,$4,$5,'tenant_admin')`, adminID, tenantID, input.Email, string(hash), input.DisplayName); err != nil {
+	if _, err = tx.Exec(r.Context(), `INSERT INTO users (id,tenant_id,email,password_hash,display_name,role) VALUES ($1,$2,$3,$4,$5,'user')`, adminID, tenantID, input.Email, string(hash), input.DisplayName); err != nil {
 		writeError(w, http.StatusInternalServerError, 50001, "cannot create initial user", requestID(r))
 		return
 	}
@@ -393,7 +393,7 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r.Context(), &tenantID, &adminID, "system.oobe_complete", "account", tenantID.String(), requestID(r), map[string]string{"email": input.Email, "account_name": input.AccountName})
-	writeJSON(w, http.StatusCreated, map[string]any{"message": "initial user created", "user": map[string]any{"id": adminID, "email": input.Email, "display_name": input.DisplayName, "role": "tenant_admin"}, "account": map[string]any{"id": tenantID, "name": input.AccountName, "merchant_no": input.MerchantNo}, "credentials": map[string]string{"api_secret": apiSecret, "callback_secret": callbackSecret}})
+	writeJSON(w, http.StatusCreated, map[string]any{"message": "initial user created", "user": map[string]any{"id": adminID, "email": input.Email, "display_name": input.DisplayName, "role": "user"}, "account": map[string]any{"id": tenantID, "name": input.AccountName, "merchant_no": input.MerchantNo}, "credentials": map[string]string{"api_secret": apiSecret, "callback_secret": callbackSecret}})
 }
 
 func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
@@ -413,14 +413,6 @@ func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
 		}
 	case strings.HasPrefix(path, "/tenants/") && r.Method == "PATCH":
 		s.patchTenant(w, r, strings.TrimPrefix(path, "/tenants/"))
-	case path == "/users":
-		if r.Method == "GET" {
-			s.listUsers(w, r)
-		} else if r.Method == "POST" {
-			s.createUser(w, r)
-		} else {
-			methodNotAllowed(w, r)
-		}
 	case path == "/channels":
 		if r.Method == "GET" {
 			s.listChannels(w, r)
@@ -545,8 +537,8 @@ func (s *Service) patchSiteSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) siteSettingsTenant(w http.ResponseWriter, r *http.Request) (*uuid.UUID, bool) {
 	p := currentPrincipal(r)
-	if p.Role != "tenant_admin" && p.Role != "platform_admin" {
-		writeError(w, http.StatusForbidden, 40301, "account owner role required", requestID(r))
+	if p.Role != "user" && p.Role != "tenant_admin" && p.Role != "platform_admin" {
+		writeError(w, http.StatusForbidden, 40301, "user account required", requestID(r))
 		return nil, false
 	}
 	tenantID, ok := s.scopedTenant(w, r)
@@ -744,95 +736,6 @@ func (s *Service) patchTenant(w http.ResponseWriter, r *http.Request, idText str
 	}
 	s.audit(r.Context(), &id, &p.UserID, "tenant.update", "tenant", id.String(), requestID(r), map[string]any{"secret_rotated": input.APISecret != nil || input.CallbackSecret != nil})
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Service) listUsers(w http.ResponseWriter, r *http.Request) {
-	tenantID, ok := s.scopedTenant(w, r)
-	if !ok {
-		return
-	}
-	query := `SELECT id,tenant_id,email,display_name,role,is_active,created_at FROM users`
-	args := []any{}
-	if tenantID != nil {
-		query += " WHERE tenant_id=$1"
-		args = append(args, *tenantID)
-	}
-	query += " ORDER BY created_at DESC"
-	rows, err := s.db.Query(r.Context(), query, args...)
-	if err != nil {
-		writeError(w, 500, 50001, "cannot load users", requestID(r))
-		return
-	}
-	defer rows.Close()
-	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id uuid.UUID
-		var tid *uuid.UUID
-		var email, name, role string
-		var active bool
-		var created time.Time
-		if rows.Scan(&id, &tid, &email, &name, &role, &active, &created) == nil {
-			items = append(items, map[string]any{"id": id, "tenant_id": tid, "email": email, "display_name": name, "role": role, "is_active": active, "created_at": created})
-		}
-	}
-	writeJSON(w, 200, map[string]any{"items": items})
-}
-func (s *Service) createUser(w http.ResponseWriter, r *http.Request) {
-	p := currentPrincipal(r)
-	if p.Role != "platform_admin" && p.Role != "tenant_admin" {
-		writeError(w, 403, 40301, "tenant administrator required", requestID(r))
-		return
-	}
-	target, ok := s.scopedTenant(w, r)
-	if !ok {
-		return
-	}
-	var input struct {
-		Email       string `json:"email"`
-		Password    string `json:"password"`
-		DisplayName string `json:"display_name"`
-		Role        string `json:"role"`
-		TenantID    string `json:"tenant_id"`
-	}
-	if !decodeJSON(w, r, &input) {
-		return
-	}
-	if p.Role == "platform_admin" && input.TenantID != "" {
-		parsed, err := uuid.Parse(input.TenantID)
-		if err != nil {
-			writeError(w, 400, 40002, "invalid tenant_id", requestID(r))
-			return
-		}
-		target = &parsed
-	}
-	if target == nil || input.Email == "" || len(input.Password) < 10 || input.DisplayName == "" {
-		writeError(w, 400, 40002, "tenant_id, email, display_name and a 10-character password are required", requestID(r))
-		return
-	}
-	if input.Role == "" {
-		input.Role = "tenant_operator"
-	}
-	if input.Role != "tenant_admin" && input.Role != "tenant_operator" && input.Role != "tenant_viewer" {
-		writeError(w, 400, 40002, "invalid user role", requestID(r))
-		return
-	}
-	if p.Role != "platform_admin" && input.Role == "tenant_admin" {
-		writeError(w, 403, 40301, "only platform administrator may create tenant administrators", requestID(r))
-		return
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
-	if err != nil {
-		writeError(w, 500, 50001, "cannot secure password", requestID(r))
-		return
-	}
-	id := uuid.New()
-	_, err = s.db.Exec(r.Context(), `INSERT INTO users (id,tenant_id,email,password_hash,display_name,role) VALUES ($1,$2,$3,$4,$5,$6)`, id, target, strings.ToLower(input.Email), string(hash), input.DisplayName, input.Role)
-	if err != nil {
-		writeError(w, 409, 40006, "email already exists", requestID(r))
-		return
-	}
-	s.audit(r.Context(), target, &p.UserID, "user.create", "user", id.String(), requestID(r), map[string]string{"email": input.Email, "role": input.Role})
-	writeJSON(w, 201, map[string]any{"id": id})
 }
 
 func (s *Service) listChannels(w http.ResponseWriter, r *http.Request) {
@@ -1360,7 +1263,7 @@ func (s *Service) mayAccessTenant(p principal, tenantID uuid.UUID) bool {
 	return p.Role == "platform_admin" || (p.TenantID != nil && *p.TenantID == tenantID)
 }
 func canManagePayments(p principal) bool {
-	return p.Role == "platform_admin" || p.Role == "tenant_admin" || p.Role == "tenant_operator"
+	return p.Role == "user" || p.Role == "platform_admin" || p.Role == "tenant_admin" || p.Role == "tenant_operator"
 }
 func isUniqueViolation(err error) bool {
 	if err == nil {

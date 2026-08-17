@@ -111,7 +111,7 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	if _, err = tx.Exec(ctx, `INSERT INTO users (id,email, password_hash, display_name, role) VALUES ($1,$2,$3,$4,'platform_admin')`, uuid.New(), "admin@tsumugi.local", string(passwordHash), "平台管理员"); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO users (id,tenant_id, email, password_hash, display_name, role) VALUES ($1,$2,$3,$4,$5,'tenant_admin')`, uuid.New(), tenantID, "merchant@tsumugi.local", string(passwordHash), "演示租户管理员"); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO users (id,tenant_id, email, password_hash, display_name, role) VALUES ($1,$2,$3,$4,$5,'user')`, uuid.New(), tenantID, "merchant@tsumugi.local", string(passwordHash), "演示用户"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
