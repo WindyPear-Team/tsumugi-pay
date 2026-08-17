@@ -82,6 +82,7 @@ yarn dev
 | `POST` | `/api/v1/admin/bills/:id/refunds` | 使用退款单号发起退款。 |
 | `GET` | `/api/v1/admin/refunds` | 退款列表。 |
 | `GET` | `/api/v1/admin/audit-logs` | 管理和资金操作审计记录。 |
+| `GET` / `PATCH` | `/api/v1/admin/site-settings` | 当前用户账户的 SMTP、hCaptcha 与 OIDC 服务配置；敏感密钥不会回显。 |
 
 ## OPS 与易支付兼容端点
 

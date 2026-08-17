@@ -100,4 +100,13 @@ func TestOOBECreatesInitialUserOnce(t *testing.T) {
 	if channel.Code != http.StatusCreated {
 		t.Fatalf("create user payment channel: %d %s", channel.Code, channel.Body.String())
 	}
+	settingsPayload := bytes.NewBufferString(`{"email":{"host":"smtp.example.test","port":587,"username":"mailer","password":"smtp-password","from":"pay@example.test"},"hcaptcha":{"site_key":"site-key","secret_key":"captcha-secret"},"oidc":{"issuer_url":"https://id.example.test","client_id":"pay","client_secret":"oidc-secret","redirect_url":"https://pay.example.test/callback"}}`)
+	settingsRequest := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/site-settings", settingsPayload)
+	settingsRequest.Header.Set("Authorization", "Bearer "+loginResponse.AccessToken)
+	settingsRequest.Header.Set("Content-Type", "application/json")
+	settingsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(settingsResponse, settingsRequest)
+	if settingsResponse.Code != http.StatusOK || bytes.Contains(settingsResponse.Body.Bytes(), []byte("smtp-password")) || bytes.Contains(settingsResponse.Body.Bytes(), []byte("captcha-secret")) || bytes.Contains(settingsResponse.Body.Bytes(), []byte("oidc-secret")) {
+		t.Fatalf("save settings should succeed without returning secrets: %d %s", settingsResponse.Code, settingsResponse.Body.String())
+	}
 }

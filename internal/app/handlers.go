@@ -45,6 +45,28 @@ type refundRecord struct {
 	Reason, Status, ProviderRefundID string
 	CreatedAt                        time.Time
 }
+type smtpSiteConfig struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	From     string `json:"from"`
+}
+type hcaptchaSiteConfig struct {
+	SiteKey   string `json:"site_key"`
+	SecretKey string `json:"secret_key"`
+}
+type oidcSiteConfig struct {
+	IssuerURL    string `json:"issuer_url"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	RedirectURL  string `json:"redirect_url"`
+}
+type accountSiteSettings struct {
+	Email    smtpSiteConfig
+	HCaptcha hcaptchaSiteConfig
+	OIDC     oidcSiteConfig
+}
 type paymentInput struct {
 	MerchantID      string `json:"merchant_id"`
 	PaymentMethod   string `json:"payment_method"`
@@ -421,6 +443,14 @@ func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
 		s.listRefunds(w, r)
 	case path == "/audit-logs" && r.Method == "GET":
 		s.listAuditLogs(w, r)
+	case path == "/site-settings":
+		if r.Method == "GET" {
+			s.getSiteSettings(w, r)
+		} else if r.Method == "PATCH" {
+			s.patchSiteSettings(w, r)
+		} else {
+			methodNotAllowed(w, r)
+		}
 	default:
 		writeError(w, 404, 40401, "admin endpoint not found", requestID(r))
 	}
@@ -438,6 +468,142 @@ func (s *Service) adminMe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, response)
+}
+
+func (s *Service) getSiteSettings(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.siteSettingsTenant(w, r)
+	if !ok {
+		return
+	}
+	settings, _, err := s.loadAccountSettings(r.Context(), *tenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot load site settings", requestID(r))
+		return
+	}
+	writeJSON(w, http.StatusOK, siteSettingsPublic(settings))
+}
+
+func (s *Service) patchSiteSettings(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := s.siteSettingsTenant(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		Email    *smtpSiteConfig     `json:"email"`
+		HCaptcha *hcaptchaSiteConfig `json:"hcaptcha"`
+		OIDC     *oidcSiteConfig     `json:"oidc"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	settings, exists, err := s.loadAccountSettings(r.Context(), *tenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot load site settings", requestID(r))
+		return
+	}
+	if input.Email != nil {
+		if input.Email.Password == "" {
+			input.Email.Password = settings.Email.Password
+		}
+		settings.Email = *input.Email
+	}
+	if input.HCaptcha != nil {
+		if input.HCaptcha.SecretKey == "" {
+			input.HCaptcha.SecretKey = settings.HCaptcha.SecretKey
+		}
+		settings.HCaptcha = *input.HCaptcha
+	}
+	if input.OIDC != nil {
+		if input.OIDC.ClientSecret == "" {
+			input.OIDC.ClientSecret = settings.OIDC.ClientSecret
+		}
+		settings.OIDC = *input.OIDC
+	}
+	emailCiphertext, err := s.encryptConfig(settings.Email)
+	if err == nil {
+		var hcaptchaCiphertext, oidcCiphertext string
+		hcaptchaCiphertext, err = s.encryptConfig(settings.HCaptcha)
+		if err == nil {
+			oidcCiphertext, err = s.encryptConfig(settings.OIDC)
+		}
+		if err == nil {
+			if exists {
+				_, err = s.db.Exec(r.Context(), `UPDATE account_settings SET email_config_ciphertext=$2,hcaptcha_config_ciphertext=$3,oidc_config_ciphertext=$4,updated_at=NOW() WHERE tenant_id=$1`, *tenantID, emailCiphertext, hcaptchaCiphertext, oidcCiphertext)
+			} else {
+				_, err = s.db.Exec(r.Context(), `INSERT INTO account_settings (tenant_id,email_config_ciphertext,hcaptcha_config_ciphertext,oidc_config_ciphertext) VALUES ($1,$2,$3,$4)`, *tenantID, emailCiphertext, hcaptchaCiphertext, oidcCiphertext)
+			}
+		}
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot save site settings", requestID(r))
+		return
+	}
+	p := currentPrincipal(r)
+	s.audit(r.Context(), tenantID, &p.UserID, "site_settings.update", "site_settings", tenantID.String(), requestID(r), map[string]bool{"email": input.Email != nil, "hcaptcha": input.HCaptcha != nil, "oidc": input.OIDC != nil})
+	writeJSON(w, http.StatusOK, siteSettingsPublic(settings))
+}
+
+func (s *Service) siteSettingsTenant(w http.ResponseWriter, r *http.Request) (*uuid.UUID, bool) {
+	p := currentPrincipal(r)
+	if p.Role != "tenant_admin" && p.Role != "platform_admin" {
+		writeError(w, http.StatusForbidden, 40301, "account owner role required", requestID(r))
+		return nil, false
+	}
+	tenantID, ok := s.scopedTenant(w, r)
+	if !ok || tenantID == nil {
+		if ok {
+			writeError(w, http.StatusBadRequest, 40002, "account context is required", requestID(r))
+		}
+		return nil, false
+	}
+	return tenantID, true
+}
+
+func (s *Service) loadAccountSettings(ctx context.Context, tenantID uuid.UUID) (accountSiteSettings, bool, error) {
+	var encryptedEmail, encryptedHCaptcha, encryptedOIDC string
+	err := s.db.QueryRow(ctx, `SELECT email_config_ciphertext,hcaptcha_config_ciphertext,oidc_config_ciphertext FROM account_settings WHERE tenant_id=$1`, tenantID).Scan(&encryptedEmail, &encryptedHCaptcha, &encryptedOIDC)
+	if isNoRows(err) {
+		return accountSiteSettings{}, false, nil
+	}
+	if err != nil {
+		return accountSiteSettings{}, false, err
+	}
+	settings := accountSiteSettings{}
+	if err = s.decryptConfig(encryptedEmail, &settings.Email); err != nil {
+		return settings, true, err
+	}
+	if err = s.decryptConfig(encryptedHCaptcha, &settings.HCaptcha); err != nil {
+		return settings, true, err
+	}
+	if err = s.decryptConfig(encryptedOIDC, &settings.OIDC); err != nil {
+		return settings, true, err
+	}
+	return settings, true, nil
+}
+
+func (s *Service) encryptConfig(value any) (string, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return s.encrypt(string(encoded))
+}
+func (s *Service) decryptConfig(ciphertext string, target any) error {
+	if ciphertext == "" {
+		return nil
+	}
+	plain, err := s.decrypt(ciphertext)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(plain), target)
+}
+func siteSettingsPublic(settings accountSiteSettings) map[string]any {
+	return map[string]any{
+		"email":    map[string]any{"host": settings.Email.Host, "port": settings.Email.Port, "username": settings.Email.Username, "from": settings.Email.From, "password_configured": settings.Email.Password != ""},
+		"hcaptcha": map[string]any{"site_key": settings.HCaptcha.SiteKey, "secret_key_configured": settings.HCaptcha.SecretKey != ""},
+		"oidc":     map[string]any{"issuer_url": settings.OIDC.IssuerURL, "client_id": settings.OIDC.ClientID, "redirect_url": settings.OIDC.RedirectURL, "client_secret_configured": settings.OIDC.ClientSecret != ""},
+	}
 }
 
 func (s *Service) dashboard(w http.ResponseWriter, r *http.Request) {
