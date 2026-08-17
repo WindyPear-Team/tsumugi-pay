@@ -1615,6 +1615,32 @@ td b {
 :root[data-theme="dark"] .modal header {
   border-color: #2d443b;
 }
+:root[data-theme="dark"] .metric-card {
+  border-color: #2a4039;
+  background: #192923;
+}
+:root[data-theme="dark"] .metric-card > span,
+:root[data-theme="dark"] .metric-card small,
+:root[data-theme="dark"] .compact-row small,
+:root[data-theme="dark"] .empty,
+:root[data-theme="dark"] .period {
+  color: #a8beb5;
+}
+:root[data-theme="dark"] .metric-card strong,
+:root[data-theme="dark"] .compact-row b,
+:root[data-theme="dark"] .empty h3 {
+  color: #e7f1ed;
+}
+:root[data-theme="dark"] .compact-row {
+  border-color: #2a4039;
+}
+:root[data-theme="dark"] .chart-plot {
+  background: repeating-linear-gradient(to bottom, transparent 0, transparent 44px, #2a4039 45px);
+}
+:root[data-theme="dark"] .chart-labels,
+:root[data-theme="dark"] .days {
+  color: #91aba0;
+}
 @media (max-width: 760px) {
   .table-tools input {
     max-width: none;
