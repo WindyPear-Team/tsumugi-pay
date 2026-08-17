@@ -108,6 +108,20 @@ func TestMultipleChannelsUsePriorityDispatch(t *testing.T) {
 }
 
 func TestOOBECreatesInitialUserOnce(t *testing.T) {
+	var discoveryServer *httptest.Server
+	discoveryServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/openid-configuration" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"issuer":                 discoveryServer.URL,
+			"authorization_endpoint": discoveryServer.URL + "/authorize",
+			"token_endpoint":         discoveryServer.URL + "/token",
+			"jwks_uri":               discoveryServer.URL + "/jwks",
+		})
+	}))
+	defer discoveryServer.Close()
 	database, err := OpenDatabase("sqlite", "file:tsumugi_oobe_test?mode=memory&cache=shared")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -116,7 +130,7 @@ func TestOOBECreatesInitialUserOnce(t *testing.T) {
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("migrate sqlite: %v", err)
 	}
-	service, err := New(Config{Database: store, JWTSecret: "test-secret", EncryptionKey: make([]byte, 32), PublicBaseURL: "http://localhost:8080", Environment: "development", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	service, err := New(Config{Database: store, JWTSecret: "test-secret", EncryptionKey: make([]byte, 32), PublicBaseURL: "http://localhost:8080", Environment: "development", HTTPClient: discoveryServer.Client(), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
@@ -160,13 +174,48 @@ func TestOOBECreatesInitialUserOnce(t *testing.T) {
 	if channel.Code != http.StatusCreated {
 		t.Fatalf("create user payment channel: %d %s", channel.Code, channel.Body.String())
 	}
-	settingsPayload := bytes.NewBufferString(`{"email":{"host":"smtp.example.test","port":587,"username":"mailer","password":"smtp-password","from":"pay@example.test"},"hcaptcha":{"site_key":"site-key","secret_key":"captcha-secret"},"oidc":{"issuer_url":"https://id.example.test","client_id":"pay","client_secret":"oidc-secret","redirect_url":"https://pay.example.test/callback"}}`)
+	settingsPayload := bytes.NewBufferString(`{"email":{"host":"smtp.example.test","port":587,"username":"mailer","password":"smtp-password","from":"pay@example.test"},"hcaptcha":{"enabled":true,"site_key":"site-key","secret_key":"captcha-secret"},"oidc":{"enabled":true,"issuer_url":"https://id.example.test","client_id":"pay","client_secret":"oidc-secret","redirect_url":"https://pay.example.test/callback"}}`)
 	settingsRequest := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/site-settings", settingsPayload)
 	settingsRequest.Header.Set("Authorization", "Bearer "+loginResponse.AccessToken)
 	settingsRequest.Header.Set("Content-Type", "application/json")
 	settingsResponse := httptest.NewRecorder()
 	handler.ServeHTTP(settingsResponse, settingsRequest)
-	if settingsResponse.Code != http.StatusOK || bytes.Contains(settingsResponse.Body.Bytes(), []byte("smtp-password")) || bytes.Contains(settingsResponse.Body.Bytes(), []byte("captcha-secret")) || bytes.Contains(settingsResponse.Body.Bytes(), []byte("oidc-secret")) {
+	if settingsResponse.Code != http.StatusOK || !bytes.Contains(settingsResponse.Body.Bytes(), []byte(`"enabled":true`)) || bytes.Contains(settingsResponse.Body.Bytes(), []byte("smtp-password")) || bytes.Contains(settingsResponse.Body.Bytes(), []byte("captcha-secret")) || bytes.Contains(settingsResponse.Body.Bytes(), []byte("oidc-secret")) {
 		t.Fatalf("save settings should succeed without returning secrets: %d %s", settingsResponse.Code, settingsResponse.Body.String())
+	}
+	discoveryPayload, err := json.Marshal(map[string]string{"issuer_url": discoveryServer.URL})
+	if err != nil {
+		t.Fatalf("marshal discovery payload: %v", err)
+	}
+	discoveryRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/site-settings/oidc-discovery", bytes.NewReader(discoveryPayload))
+	discoveryRequest.Header.Set("Authorization", "Bearer "+loginResponse.AccessToken)
+	discoveryRequest.Header.Set("Content-Type", "application/json")
+	discoveryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(discoveryResponse, discoveryRequest)
+	if discoveryResponse.Code != http.StatusOK || !bytes.Contains(discoveryResponse.Body.Bytes(), []byte(`"token_endpoint"`)) || bytes.Contains(discoveryResponse.Body.Bytes(), []byte("oidc-secret")) {
+		t.Fatalf("OIDC discovery should expose only public metadata: %d %s", discoveryResponse.Code, discoveryResponse.Body.String())
+	}
+	var user User
+	if err := store.DB().Where("email = ?", "first@example.test").Take(&user).Error; err != nil {
+		t.Fatalf("load setup user: %v", err)
+	}
+	var paymentChannel PaymentChannel
+	if err := store.DB().Where("account_id = ?", user.AccountID).Take(&paymentChannel).Error; err != nil {
+		t.Fatalf("load payment channel: %v", err)
+	}
+	bill := Bill{ID: uuid.New(), AccountID: *user.AccountID, ChannelID: paymentChannel.ID, PlatformOrderNo: "PLATFORM-RECONCILE-001", MerchantOrderNo: "ORDER-RECONCILE-001", Subject: "补单测试", AmountMinor: 990, Currency: "CNY", Provider: "alipay", Scene: "pc", Status: "pending"}
+	if err := store.DB().Create(&bill).Error; err != nil {
+		t.Fatalf("create pending bill: %v", err)
+	}
+	reconcileRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/bills/"+bill.ID.String()+"/reconcile", bytes.NewBufferString(`{"provider_transaction_id":"202608170001"}`))
+	reconcileRequest.Header.Set("Authorization", "Bearer "+loginResponse.AccessToken)
+	reconcileRequest.Header.Set("Content-Type", "application/json")
+	reconcileResponse := httptest.NewRecorder()
+	handler.ServeHTTP(reconcileResponse, reconcileRequest)
+	if reconcileResponse.Code != http.StatusOK {
+		t.Fatalf("reconcile pending bill: %d %s", reconcileResponse.Code, reconcileResponse.Body.String())
+	}
+	if err := store.DB().Take(&bill, "id = ?", bill.ID).Error; err != nil || bill.Status != "paid" || bill.ProviderTransactionID != "202608170001" {
+		t.Fatalf("reconciled bill should be paid with provider trade id: %+v, err=%v", bill, err)
 	}
 }

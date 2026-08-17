@@ -56,14 +56,19 @@ type smtpSiteConfig struct {
 	From     string `json:"from"`
 }
 type hcaptchaSiteConfig struct {
+	Enabled   bool   `json:"enabled"`
 	SiteKey   string `json:"site_key"`
 	SecretKey string `json:"secret_key"`
 }
 type oidcSiteConfig struct {
-	IssuerURL    string `json:"issuer_url"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-	RedirectURL  string `json:"redirect_url"`
+	Enabled               bool   `json:"enabled"`
+	IssuerURL             string `json:"issuer_url"`
+	ClientID              string `json:"client_id"`
+	ClientSecret          string `json:"client_secret"`
+	RedirectURL           string `json:"redirect_url"`
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint"`
+	JWKSURI               string `json:"jwks_uri"`
 }
 type accountSiteSettings struct {
 	Email    smtpSiteConfig
@@ -452,12 +457,16 @@ func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
 		s.createRefund(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/bills/"), "/refunds"))
 	case strings.HasPrefix(path, "/bills/") && strings.HasSuffix(path, "/close") && r.Method == "POST":
 		s.closeBill(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/bills/"), "/close"))
+	case strings.HasPrefix(path, "/bills/") && strings.HasSuffix(path, "/reconcile") && r.Method == "POST":
+		s.reconcileBill(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/bills/"), "/reconcile"))
 	case strings.HasPrefix(path, "/bills/") && r.Method == "GET":
 		s.getBill(w, r, strings.TrimPrefix(path, "/bills/"))
 	case path == "/refunds" && r.Method == "GET":
 		s.listRefunds(w, r)
 	case path == "/audit-logs" && r.Method == "GET":
 		s.listAuditLogs(w, r)
+	case path == "/site-settings/oidc-discovery" && r.Method == "POST":
+		s.discoverOIDC(w, r)
 	case path == "/site-settings":
 		if r.Method == "GET" {
 			s.getSiteSettings(w, r)
@@ -559,6 +568,62 @@ func (s *Service) patchSiteSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, siteSettingsPublic(settings))
 }
 
+func (s *Service) discoverOIDC(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.siteSettingsAccount(w, r); !ok {
+		return
+	}
+	var input struct {
+		IssuerURL string `json:"issuer_url"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	issuer, err := s.normalizedOIDCIssuer(input.IssuerURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, 40002, "invalid OIDC issuer URL", requestID(r))
+		return
+	}
+	client := s.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, issuer+"/.well-known/openid-configuration", nil)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, 40002, "invalid OIDC issuer URL", requestID(r))
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, 50201, "cannot discover OIDC provider", requestID(r))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		writeError(w, http.StatusBadGateway, 50201, "OIDC provider discovery failed", requestID(r))
+		return
+	}
+	var discovery struct {
+		Issuer                string `json:"issuer"`
+		AuthorizationEndpoint string `json:"authorization_endpoint"`
+		TokenEndpoint         string `json:"token_endpoint"`
+		JWKSURI               string `json:"jwks_uri"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&discovery); err != nil {
+		writeError(w, http.StatusBadGateway, 50201, "invalid OIDC discovery response", requestID(r))
+		return
+	}
+	discoveredIssuer, err := s.normalizedOIDCIssuer(discovery.Issuer)
+	if err != nil || discoveredIssuer != issuer || !s.validExternalURL(discovery.AuthorizationEndpoint) || !s.validExternalURL(discovery.TokenEndpoint) || !s.validExternalURL(discovery.JWKSURI) {
+		writeError(w, http.StatusBadGateway, 50201, "invalid OIDC discovery response", requestID(r))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"issuer_url": issuer, "authorization_endpoint": discovery.AuthorizationEndpoint,
+		"token_endpoint": discovery.TokenEndpoint, "jwks_uri": discovery.JWKSURI,
+	})
+}
+
 func (s *Service) siteSettingsAccount(w http.ResponseWriter, r *http.Request) (*uuid.UUID, bool) {
 	p := currentPrincipal(r)
 	if p.Role != "user" {
@@ -617,8 +682,8 @@ func (s *Service) decryptConfig(ciphertext string, target any) error {
 func siteSettingsPublic(settings accountSiteSettings) map[string]any {
 	return map[string]any{
 		"email":    map[string]any{"host": settings.Email.Host, "port": settings.Email.Port, "username": settings.Email.Username, "from": settings.Email.From, "password_configured": settings.Email.Password != ""},
-		"hcaptcha": map[string]any{"site_key": settings.HCaptcha.SiteKey, "secret_key_configured": settings.HCaptcha.SecretKey != ""},
-		"oidc":     map[string]any{"issuer_url": settings.OIDC.IssuerURL, "client_id": settings.OIDC.ClientID, "redirect_url": settings.OIDC.RedirectURL, "client_secret_configured": settings.OIDC.ClientSecret != ""},
+		"hcaptcha": map[string]any{"enabled": settings.HCaptcha.Enabled, "site_key": settings.HCaptcha.SiteKey, "secret_key_configured": settings.HCaptcha.SecretKey != ""},
+		"oidc":     map[string]any{"enabled": settings.OIDC.Enabled, "issuer_url": settings.OIDC.IssuerURL, "client_id": settings.OIDC.ClientID, "redirect_url": settings.OIDC.RedirectURL, "authorization_endpoint": settings.OIDC.AuthorizationEndpoint, "token_endpoint": settings.OIDC.TokenEndpoint, "jwks_uri": settings.OIDC.JWKSURI, "client_secret_configured": settings.OIDC.ClientSecret != ""},
 	}
 }
 
@@ -1056,6 +1121,69 @@ func (s *Service) closeBill(w http.ResponseWriter, r *http.Request, billText str
 	s.audit(r.Context(), &bill.AccountID, &p.UserID, "bill.close", "bill", bill.ID.String(), requestID(r), map[string]any{})
 	w.WriteHeader(http.StatusNoContent)
 }
+func (s *Service) reconcileBill(w http.ResponseWriter, r *http.Request, billText string) {
+	p := currentPrincipal(r)
+	if !canManagePayments(p) {
+		writeError(w, http.StatusForbidden, 40301, "payment operator role required", requestID(r))
+		return
+	}
+	id, err := uuid.Parse(billText)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, 40002, "invalid bill id", requestID(r))
+		return
+	}
+	var input struct {
+		ProviderTransactionID string `json:"provider_transaction_id"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.ProviderTransactionID = strings.TrimSpace(input.ProviderTransactionID)
+	if input.ProviderTransactionID == "" {
+		writeError(w, http.StatusBadRequest, 40002, "provider_transaction_id is required", requestID(r))
+		return
+	}
+	var bill billRecord
+	err = s.db.DB().WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		var model Bill
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&model, "id = ?", id).Error; err != nil {
+			return err
+		}
+		bill = billRecordFromModel(model)
+		if !s.mayAccessAccount(p, bill.AccountID) {
+			return clientError{40301, "account access denied"}
+		}
+		if bill.Status != "pending" {
+			return clientError{40002, "only pending bill can be reconciled"}
+		}
+		paidAt := nowUTC()
+		payload, _ := json.Marshal(map[string]any{"reconciled": true, "provider_transaction_id": input.ProviderTransactionID})
+		if err := tx.Model(&Bill{}).Where("id = ? AND status = ?", bill.ID, "pending").Updates(map[string]any{"status": "paid", "provider_transaction_id": input.ProviderTransactionID, "provider_payload": string(payload), "paid_at": paidAt}).Error; err != nil {
+			return err
+		}
+		bill.Status, bill.ProviderTransactionID, bill.PaidAt = "paid", input.ProviderTransactionID, &paidAt
+		return nil
+	})
+	if err != nil {
+		if client, ok := err.(clientError); ok {
+			status := http.StatusConflict
+			if client.Code == 40301 {
+				status = http.StatusForbidden
+			}
+			writeError(w, status, client.Code, client.Message, requestID(r))
+			return
+		}
+		if isNoRows(err) {
+			writeError(w, http.StatusNotFound, 40401, "bill not found", requestID(r))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, 50001, "cannot reconcile bill", requestID(r))
+		return
+	}
+	s.audit(r.Context(), &bill.AccountID, &p.UserID, "bill.reconcile", "bill", bill.ID.String(), requestID(r), map[string]string{"provider_transaction_id": input.ProviderTransactionID})
+	go s.notifyMerchant(context.Background(), bill)
+	writeJSON(w, http.StatusOK, map[string]any{"data": billPublic(bill)})
+}
 func (s *Service) listRefunds(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := s.scopedAccount(w, r)
 	if !ok {
@@ -1209,7 +1337,11 @@ func (s *Service) notifyMerchant(ctx context.Context, bill billRecord) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := s.httpClient.Do(req)
+	client := s.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	resp, err := client.Do(req)
 	if err == nil && resp != nil {
 		_ = resp.Body.Close()
 	}
@@ -1277,6 +1409,9 @@ func isUniqueViolation(err error) bool {
 	return strings.Contains(message, "unique") || strings.Contains(message, "duplicate")
 }
 func (s *Service) validCallbackURL(raw string) bool {
+	return s.validExternalURL(raw)
+}
+func (s *Service) validExternalURL(raw string) bool {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return false
@@ -1292,7 +1427,29 @@ func (s *Service) validCallbackURL(raw string) bool {
 	if ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
 		return s.environment != "production"
 	}
+	if s.environment == "production" && ip == nil {
+		resolved, err := net.LookupIP(host)
+		if err != nil || len(resolved) == 0 {
+			return false
+		}
+		for _, address := range resolved {
+			if address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast() {
+				return false
+			}
+		}
+	}
 	return parsed.Scheme == "https" || parsed.Scheme == "http"
+}
+func (s *Service) normalizedOIDCIssuer(raw string) (string, error) {
+	issuer := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if !s.validExternalURL(issuer) {
+		return "", errors.New("invalid issuer URL")
+	}
+	parsed, _ := url.Parse(issuer)
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("issuer URL must not contain a query or fragment")
+	}
+	return issuer, nil
 }
 func (in *paymentInput) normalize() {
 	if in.MerchantID == "" {
