@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import "./index.css";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,12 +22,15 @@ type SiteSettings = { email: { host: string; port: number; username: string; fro
 const API = import.meta.env.VITE_API_BASE_URL || "";
 const statusName: Record<string, string> = { pending: "待支付", paid: "已支付", closed: "已关闭", failed: "失败", refunding: "退款中", refunded: "已退款", active: "正常", suspended: "已暂停" };
 const providerName: Record<string, string> = { alipay: "支付宝", wechat: "微信支付" };
+const viewPaths: Record<View, string> = { overview: "/", bills: "/bills", refunds: "/refunds", channels: "/channels", tenants: "/users", users: "/members", audit: "/audit-logs", developers: "/developers", settings: "/settings" };
+function viewFromPath(pathname: string): View { return (Object.entries(viewPaths).find(([, path]) => path === pathname)?.[0] as View | undefined) || "overview"; }
 
 export default function App() {
+	const location = useLocation(); const navigate = useNavigate();
   const [token, setToken] = useState(localStorage.getItem("tsumugi_access_token") || "");
 	const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
 	const [setupEmail, setSetupEmail] = useState("");
-  const [view, setView] = useState<View>("overview");
+	const view = viewFromPath(location.pathname);
   const [user, setUser] = useState<any>(null);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [tenantId, setTenantId] = useState(localStorage.getItem("tsumugi_tenant_id") || "");
@@ -103,8 +107,11 @@ export default function App() {
   function chooseTenant(id: string) { setTenantId(id); localStorage.setItem("tsumugi_tenant_id", id); }
 
   if (!token && setupRequired === null) return <div className="login-page"><div className="login-panel"><div className="brand login-brand"><span className="brand-mark">T</span><span>Tsumugi <b>Pay</b></span></div><p className="demo-note">正在检查系统初始化状态…</p></div></div>;
-  if (!token && setupRequired) return <Setup onCompleted={(email) => { setSetupEmail(email); setSetupRequired(false); }} />;
-  if (!token) return <Login initialEmail={setupEmail} onSuccess={(value) => { localStorage.setItem("tsumugi_access_token", value); setToken(value); }} />;
+  if (!token && setupRequired && location.pathname !== "/setup") return <Navigate to="/setup" replace />;
+  if (!token && !setupRequired && location.pathname !== "/login") return <Navigate to="/login" replace />;
+  if (!token && location.pathname === "/setup") return <Setup onCompleted={(email) => { setSetupEmail(email); setSetupRequired(false); navigate("/login", { replace: true }); }} />;
+  if (!token) return <Login initialEmail={setupEmail} onSuccess={(value) => { localStorage.setItem("tsumugi_access_token", value); setToken(value); navigate("/", { replace: true }); }} />;
+  if (location.pathname === "/login" || location.pathname === "/setup") return <Navigate to="/" replace />;
 
   const nav: { key: View; label: string; icon: string; admin?: boolean }[] = [
     { key: "overview", label: "工作台", icon: "⌘" },
@@ -122,7 +129,7 @@ export default function App() {
       <div className="brand"><span className="brand-mark">T</span><span>Tsumugi <b>Pay</b></span></div>
       <div className="workspace-label">支付运营中心</div>
       <SidebarContent>
-        <SidebarMenu>{nav.filter((item) => !item.admin || isPlatformAdmin).map((item) => <SidebarMenuItem key={item.key}><SidebarMenuButton type="button" className="nav-item" isActive={view === item.key} onClick={() => setView(item.key)}><span className="nav-icon">{item.icon}</span>{item.label}</SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu>
+        <SidebarMenu>{nav.filter((item) => !item.admin || isPlatformAdmin).map((item) => <SidebarMenuItem key={item.key}><SidebarMenuButton type="button" className="nav-item" isActive={view === item.key} onClick={() => navigate(viewPaths[item.key])}><span className="nav-icon">{item.icon}</span>{item.label}</SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu>
       </SidebarContent>
       <SidebarFooter>
         <div className="security-card"><span className="status-dot" /> 官方通道直连<br/><small>密钥以加密方式存储</small></div>
@@ -139,15 +146,18 @@ export default function App() {
       </header>
       {error && <div className="alert"><b>操作提示：</b>{error}<button onClick={() => setError("")}>×</button></div>}
       {loading && <div className="loading-line" />}
-      {view === "overview" && <Overview data={dashboard} bills={bills} setView={setView} />}
-      {view === "bills" && <Bills data={bills} canManage={canManagePayments} onRefresh={loadContent} request={request} />}
-      {view === "refunds" && <Refunds data={refunds} />}
-      {view === "channels" && <Channels data={channels} tenant={activeTenant} canManage={canManagePayments} onRefresh={loadContent} request={request} />}
-      {view === "tenants" && <Tenants data={tenants} onRefresh={loadContent} request={request} />}
-      {view === "users" && <Users data={users} tenants={tenants} activeTenant={activeTenant} isPlatformAdmin={isPlatformAdmin} canManage={canManageUsers} onRefresh={loadContent} request={request} />}
-      {view === "audit" && <AuditLogs data={auditLogs} />}
-      {view === "developers" && <Developers tenant={activeTenant} />}
-		{view === "settings" && <Settings user={user} tenant={activeTenant} settings={siteSettings} onSaved={setSiteSettings} request={request} />}
+      <Routes>
+        <Route path="/" element={<Overview data={dashboard} bills={bills} setView={(next) => navigate(viewPaths[next])} />} />
+        <Route path="/bills" element={<Bills data={bills} canManage={canManagePayments} onRefresh={loadContent} request={request} />} />
+        <Route path="/refunds" element={<Refunds data={refunds} />} />
+        <Route path="/channels" element={<Channels data={channels} tenant={activeTenant} canManage={canManagePayments} onRefresh={loadContent} request={request} />} />
+        <Route path="/users" element={<Tenants data={tenants} onRefresh={loadContent} request={request} />} />
+        <Route path="/members" element={<Users data={users} tenants={tenants} activeTenant={activeTenant} isPlatformAdmin={isPlatformAdmin} canManage={canManageUsers} onRefresh={loadContent} request={request} />} />
+        <Route path="/audit-logs" element={<AuditLogs data={auditLogs} />} />
+        <Route path="/developers" element={<Developers tenant={activeTenant} />} />
+		<Route path="/settings" element={<Settings user={user} tenant={activeTenant} settings={siteSettings} onSaved={setSiteSettings} request={request} />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
     </main>
   </SidebarProvider>;
 }
