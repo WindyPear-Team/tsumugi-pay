@@ -114,11 +114,6 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	if _, err = tx.Exec(ctx, `INSERT INTO users (id,tenant_id, email, password_hash, display_name, role) VALUES ($1,$2,$3,$4,$5,'tenant_admin')`, uuid.New(), tenantID, "merchant@tsumugi.local", string(passwordHash), "演示租户管理员"); err != nil {
 		return err
 	}
-	for _, provider := range []string{"alipay", "wechat"} {
-		if _, err = tx.Exec(ctx, `INSERT INTO payment_channels (id,tenant_id,provider,display_name,webhook_token) VALUES ($1,$2,$3,$4,$5)`, uuid.New(), tenantID, provider, map[string]string{"alipay": "支付宝官方接口", "wechat": "微信支付官方接口"}[provider], randomToken(24)); err != nil {
-			return err
-		}
-	}
 	return tx.Commit(ctx)
 }
 

@@ -286,7 +286,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 }
 
 // setupStatus is deliberately minimal: it only reveals whether an initial
-// administrator needs to be created, never any account or tenant metadata.
+// user needs to be created, never any account metadata.
 func (s *Service) setupStatus(w http.ResponseWriter, r *http.Request) {
 	var users int
 	if err := s.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
@@ -303,15 +303,22 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name"`
 		Email       string `json:"email"`
 		Password    string `json:"password"`
+		AccountName string `json:"account_name"`
+		MerchantNo  string `json:"merchant_no"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
 	}
 	input.DisplayName = strings.TrimSpace(input.DisplayName)
 	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
-	if input.DisplayName == "" || input.Email == "" || len(input.Password) < 10 {
-		writeError(w, http.StatusBadRequest, 40002, "display_name, email and a 10-character password are required", requestID(r))
+	input.AccountName = strings.TrimSpace(input.AccountName)
+	input.MerchantNo = strings.TrimSpace(input.MerchantNo)
+	if input.DisplayName == "" || input.Email == "" || input.AccountName == "" || len(input.Password) < 10 {
+		writeError(w, http.StatusBadRequest, 40002, "account_name, display_name, email and a 10-character password are required", requestID(r))
 		return
+	}
+	if input.MerchantNo == "" {
+		input.MerchantNo = "M" + strings.ToUpper(randomToken(8))
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -342,16 +349,29 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	adminID := uuid.New()
-	if _, err = tx.Exec(r.Context(), `INSERT INTO users (id,email,password_hash,display_name,role) VALUES ($1,$2,$3,$4,'platform_admin')`, adminID, input.Email, string(hash), input.DisplayName); err != nil {
-		writeError(w, http.StatusInternalServerError, 50001, "cannot create initial administrator", requestID(r))
+	tenantID := uuid.New()
+	apiSecret := randomToken(32)
+	callbackSecret := randomToken(32)
+	apiCiphertext, encryptErr := s.encrypt(apiSecret)
+	callbackCiphertext, callbackEncryptErr := s.encrypt(callbackSecret)
+	if encryptErr != nil || callbackEncryptErr != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot secure account credentials", requestID(r))
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `INSERT INTO tenants (id,name,merchant_no,api_secret_ciphertext,callback_secret_ciphertext) VALUES ($1,$2,$3,$4,$5)`, tenantID, input.AccountName, input.MerchantNo, apiCiphertext, callbackCiphertext); err != nil {
+		writeError(w, http.StatusConflict, 40006, "merchant number already exists", requestID(r))
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `INSERT INTO users (id,tenant_id,email,password_hash,display_name,role) VALUES ($1,$2,$3,$4,$5,'tenant_admin')`, adminID, tenantID, input.Email, string(hash), input.DisplayName); err != nil {
+		writeError(w, http.StatusInternalServerError, 50001, "cannot create initial user", requestID(r))
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, 50001, "cannot complete setup", requestID(r))
 		return
 	}
-	s.audit(r.Context(), nil, &adminID, "system.oobe_complete", "system", "initial_setup", requestID(r), map[string]string{"email": input.Email})
-	writeJSON(w, http.StatusCreated, map[string]any{"message": "initial administrator created", "user": map[string]any{"id": adminID, "email": input.Email, "display_name": input.DisplayName}})
+	s.audit(r.Context(), &tenantID, &adminID, "system.oobe_complete", "account", tenantID.String(), requestID(r), map[string]string{"email": input.Email, "account_name": input.AccountName})
+	writeJSON(w, http.StatusCreated, map[string]any{"message": "initial user created", "user": map[string]any{"id": adminID, "email": input.Email, "display_name": input.DisplayName, "role": "tenant_admin"}, "account": map[string]any{"id": tenantID, "name": input.AccountName, "merchant_no": input.MerchantNo}, "credentials": map[string]string{"api_secret": apiSecret, "callback_secret": callbackSecret}})
 }
 
 func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
@@ -379,8 +399,14 @@ func (s *Service) admin(w http.ResponseWriter, r *http.Request) {
 		} else {
 			methodNotAllowed(w, r)
 		}
-	case path == "/channels" && r.Method == "GET":
-		s.listChannels(w, r)
+	case path == "/channels":
+		if r.Method == "GET" {
+			s.listChannels(w, r)
+		} else if r.Method == "POST" {
+			s.createChannel(w, r)
+		} else {
+			methodNotAllowed(w, r)
+		}
 	case strings.HasPrefix(path, "/channels/") && r.Method == "PATCH":
 		s.patchChannel(w, r, strings.TrimPrefix(path, "/channels/"))
 	case path == "/bills" && r.Method == "GET":
@@ -404,11 +430,11 @@ func methodNotAllowed(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Service) adminMe(w http.ResponseWriter, r *http.Request) {
 	p := currentPrincipal(r)
-	response := map[string]any{"id": p.UserID, "email": p.Email, "role": p.Role, "tenant_id": p.TenantID}
+	response := map[string]any{"id": p.UserID, "email": p.Email, "role": p.Role, "account_id": p.TenantID}
 	if p.TenantID != nil {
 		var tenant struct{ Name, MerchantNo, Status string }
 		if err := s.db.QueryRow(r.Context(), `SELECT name,merchant_no,status FROM tenants WHERE id=$1`, *p.TenantID).Scan(&tenant.Name, &tenant.MerchantNo, &tenant.Status); err == nil {
-			response["tenant"] = map[string]any{"id": p.TenantID, "name": tenant.Name, "merchant_no": tenant.MerchantNo, "status": tenant.Status}
+			response["account"] = map[string]any{"id": p.TenantID, "name": tenant.Name, "merchant_no": tenant.MerchantNo, "status": tenant.Status}
 		}
 	}
 	writeJSON(w, 200, response)
@@ -508,9 +534,6 @@ func (s *Service) createTenant(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, 409, 40006, "merchant number already exists", requestID(r))
 		return
-	}
-	for _, provider := range []string{"alipay", "wechat"} {
-		_, _ = s.db.Exec(r.Context(), `INSERT INTO payment_channels (id,tenant_id,provider,display_name,webhook_token) VALUES ($1,$2,$3,$4,$5)`, uuid.New(), id, provider, map[string]string{"alipay": "支付宝官方接口", "wechat": "微信支付官方接口"}[provider], randomToken(24))
 	}
 	s.audit(r.Context(), &id, &p.UserID, "tenant.create", "tenant", id.String(), requestID(r), map[string]string{"name": input.Name})
 	writeJSON(w, 201, map[string]any{"id": id, "name": input.Name, "merchant_no": input.MerchantNo})
@@ -672,6 +695,48 @@ func (s *Service) listChannels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
+}
+func (s *Service) createChannel(w http.ResponseWriter, r *http.Request) {
+	p := currentPrincipal(r)
+	if !canManagePayments(p) {
+		writeError(w, http.StatusForbidden, 40301, "payment operator role required", requestID(r))
+		return
+	}
+	tenantID, ok := s.scopedTenant(w, r)
+	if !ok || tenantID == nil {
+		if ok {
+			writeError(w, http.StatusBadRequest, 40002, "select a tenant through X-Tenant-ID", requestID(r))
+		}
+		return
+	}
+	var input struct {
+		Provider    string `json:"provider"`
+		DisplayName string `json:"display_name"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.Provider = strings.ToLower(strings.TrimSpace(input.Provider))
+	input.DisplayName = strings.TrimSpace(input.DisplayName)
+	if input.Provider != "alipay" && input.Provider != "wechat" {
+		writeError(w, http.StatusBadRequest, 40003, "provider must be alipay or wechat", requestID(r))
+		return
+	}
+	if input.DisplayName == "" {
+		input.DisplayName = map[string]string{"alipay": "支付宝", "wechat": "微信支付"}[input.Provider]
+	}
+	channelID := uuid.New()
+	_, err := s.db.Exec(r.Context(), `INSERT INTO payment_channels (id,tenant_id,provider,display_name,webhook_token) VALUES ($1,$2,$3,$4,$5)`, channelID, *tenantID, input.Provider, input.DisplayName, randomToken(24))
+	if err != nil {
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, 40006, "this payment provider has already been added", requestID(r))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, 50001, "cannot create payment channel", requestID(r))
+		return
+	}
+	s.audit(r.Context(), tenantID, &p.UserID, "channel.create", "payment_channel", channelID.String(), requestID(r), map[string]string{"provider": input.Provider})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": channelID, "provider": input.Provider, "display_name": input.DisplayName})
 }
 func (s *Service) patchChannel(w http.ResponseWriter, r *http.Request, idText string) {
 	p := currentPrincipal(r)

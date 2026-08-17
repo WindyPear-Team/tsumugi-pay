@@ -38,7 +38,7 @@ func TestSQLiteSchemaAndBootstrap(t *testing.T) {
 	if err := store.QueryRow(context.Background(), `SELECT COUNT(*) FROM payment_channels`).Scan(&channels); err != nil {
 		t.Fatalf("count channels: %v", err)
 	}
-	if users != 2 || channels != 2 {
+	if users != 2 || channels != 0 {
 		t.Fatalf("unexpected demo data: users=%d channels=%d", users, channels)
 	}
 }
@@ -50,7 +50,7 @@ func TestNormalizeSQL(t *testing.T) {
 	}
 }
 
-func TestOOBECreatesInitialAdministratorOnce(t *testing.T) {
+func TestOOBECreatesInitialUserOnce(t *testing.T) {
 	database, err := OpenDatabase("sqlite", "file:tsumugi_oobe_test?mode=memory&cache=shared")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -69,7 +69,7 @@ func TestOOBECreatesInitialAdministratorOnce(t *testing.T) {
 	if status.Code != http.StatusOK || !bytes.Contains(status.Body.Bytes(), []byte(`"required":true`)) {
 		t.Fatalf("unexpected initial setup status: %d %s", status.Code, status.Body.String())
 	}
-	payload, _ := json.Marshal(map[string]string{"display_name": "First Admin", "email": "first@example.test", "password": "A-strong-password"})
+	payload, _ := json.Marshal(map[string]string{"account_name": "First User", "display_name": "First User", "email": "first@example.test", "password": "A-strong-password"})
 	setup := httptest.NewRecorder()
 	handler.ServeHTTP(setup, httptest.NewRequest(http.MethodPost, "/api/v1/setup/initialize", bytes.NewReader(payload)))
 	if setup.Code != http.StatusCreated {
@@ -84,5 +84,20 @@ func TestOOBECreatesInitialAdministratorOnce(t *testing.T) {
 	handler.ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(payload)))
 	if login.Code != http.StatusOK {
 		t.Fatalf("login with OOBE administrator: %d %s", login.Code, login.Body.String())
+	}
+	var loginResponse struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(login.Body.Bytes(), &loginResponse); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	channelPayload := bytes.NewBufferString(`{"provider":"alipay","display_name":"支付宝"}`)
+	channelRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/channels", channelPayload)
+	channelRequest.Header.Set("Authorization", "Bearer "+loginResponse.AccessToken)
+	channelRequest.Header.Set("Content-Type", "application/json")
+	channel := httptest.NewRecorder()
+	handler.ServeHTTP(channel, channelRequest)
+	if channel.Code != http.StatusCreated {
+		t.Fatalf("create user payment channel: %d %s", channel.Code, channel.Body.String())
 	}
 }

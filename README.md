@@ -1,6 +1,6 @@
 # Tsumugi Pay
 
-Tsumugi Pay 是一个面向 SaaS 场景的**多租户支付运营系统**。项目由 Go 服务端和 React/Vite 管理后台组成，兼容 Open Payment Specification（OPS）的发现、易支付表单下单、接口下单、查询与异步通知语义，并为支付宝和微信支付保留官方直连接入路径。[1]
+Tsumugi Pay 是一个面向 SaaS 场景的**多用户支付运营系统**。每位用户拥有独立的支付工作区、账单和支付通道。项目由 Go 服务端和 React/Vite 管理后台组成，兼容 Open Payment Specification（OPS）的发现、易支付表单下单、接口下单、查询与异步通知语义，并为支付宝和微信支付保留官方直连接入路径。[1]
 
 > 本项目实现的是支付系统软件与官方 API 适配层，不提供收单资质、商户主体、应用签约或生产密钥。接入生产环境前，运营方必须使用自己的支付宝与微信支付商户资质，并完成各服务商要求的准入和验收。
 
@@ -48,7 +48,7 @@ yarn dev
 
 ## 首次启动向导（OOBE）
 
-当数据库中尚无用户时，访问管理后台会自动进入首次启动向导，创建第一位**平台管理员**。向导完成后该入口会永久关闭，之后由平台管理员在“租户管理”和“成员与权限”中创建租户及租户成员。该流程适用于 `BOOTSTRAP_DEMO=false` 的生产首次部署；若启用了演示数据，则不会显示向导。
+当数据库中尚无用户时，访问管理后台会自动进入首次启动向导，创建第一位**用户**及其独立支付工作区。向导完成后该入口会永久关闭；用户可在“支付通道”自行添加支付宝或微信支付。该流程适用于 `BOOTSTRAP_DEMO=false` 的生产首次部署；若启用了演示数据，则不会显示向导。
 
 | 配置项 | 开发默认值 | 生产要求 |
 | --- | --- | --- |
@@ -68,13 +68,13 @@ yarn dev
 | --- | --- | --- |
 | `POST` | `/api/v1/auth/login` | 后台用户登录。 |
 | `GET` | `/api/v1/setup/status` | 查询是否需要首次初始化。仅暴露是否需要初始化。 |
-| `POST` | `/api/v1/setup/initialize` | 系统无用户时创建首个平台管理员；一次性入口。 |
+| `POST` | `/api/v1/setup/initialize` | 系统无用户时创建首位用户及其支付工作区；一次性入口。 |
 | `GET` | `/api/v1/admin/me` | 当前会话身份与角色。 |
 | `GET` | `/api/v1/admin/dashboard` | 账单与成功金额汇总。 |
 | `GET` / `POST` | `/api/v1/admin/tenants` | 平台管理员列出或创建租户。 |
 | `PATCH` | `/api/v1/admin/tenants/:id` | 修改租户状态或轮换 API、回调密钥。 |
 | `GET` / `POST` | `/api/v1/admin/users` | 租户内用户管理。 |
-| `GET` | `/api/v1/admin/channels` | 当前租户支付宝、微信支付通道。 |
+| `GET` / `POST` | `/api/v1/admin/channels` | 当前用户查询或添加自己的支付宝、微信支付通道。 |
 | `PATCH` | `/api/v1/admin/channels/:id` | 保存官方凭据、修改名称及启停通道。 |
 | `GET` | `/api/v1/admin/bills` | 账单查询，支持 `?status=` 筛选。 |
 | `GET` | `/api/v1/admin/bills/:id` | 单笔账单详情。 |
