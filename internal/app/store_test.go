@@ -50,6 +50,28 @@ func TestNormalizeSQL(t *testing.T) {
 	}
 }
 
+func TestMigrateRenamesLegacyAccountColumns(t *testing.T) {
+	database, err := OpenDatabase("sqlite", "file:tsumugi_legacy_test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	store := NewStore(database)
+	ctx := context.Background()
+	if _, err := store.Exec(ctx, `CREATE TABLE tenants (id TEXT PRIMARY KEY, name TEXT, merchant_no TEXT, status TEXT, api_secret_ciphertext TEXT, callback_secret_ciphertext TEXT)`); err != nil {
+		t.Fatalf("create legacy accounts: %v", err)
+	}
+	if _, err := store.Exec(ctx, `CREATE TABLE bills (id TEXT PRIMARY KEY, tenant_id TEXT, status TEXT, created_at TIMESTAMP)`); err != nil {
+		t.Fatalf("create legacy bills: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate legacy schema: %v", err)
+	}
+	migrator := database.Migrator()
+	if !migrator.HasTable("accounts") || migrator.HasTable("tenants") || !migrator.HasColumn("bills", "account_id") {
+		t.Fatal("legacy account schema was not renamed")
+	}
+}
+
 func TestOOBECreatesInitialUserOnce(t *testing.T) {
 	database, err := OpenDatabase("sqlite", "file:tsumugi_oobe_test?mode=memory&cache=shared")
 	if err != nil {

@@ -15,6 +15,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.migrateLegacyAccountNames(ctx); err != nil {
+		return err
+	}
 	for _, statement := range portableSchema {
 		if s.db.Dialector.Name() == "mysql" && strings.HasPrefix(statement, "CREATE INDEX IF NOT EXISTS") {
 			statement = strings.Replace(statement, " IF NOT EXISTS", "", 1)
@@ -24,6 +27,26 @@ func (s *Store) Migrate(ctx context.Context) error {
 				continue
 			}
 			return fmt.Errorf("apply schema: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateLegacyAccountNames upgrades databases created before the user-account
+// terminology change without discarding payment data. GORM selects the proper
+// ALTER syntax for PostgreSQL, MySQL, and SQLite.
+func (s *Store) migrateLegacyAccountNames(ctx context.Context) error {
+	migrator := s.db.WithContext(ctx).Migrator()
+	if migrator.HasTable("tenants") && !migrator.HasTable("accounts") {
+		if err := migrator.RenameTable("tenants", "accounts"); err != nil {
+			return fmt.Errorf("rename legacy accounts table: %w", err)
+		}
+	}
+	for _, table := range []string{"users", "payment_channels", "bills", "refunds", "webhook_events", "audit_logs", "account_settings"} {
+		if migrator.HasTable(table) && migrator.HasColumn(table, "tenant_id") && !migrator.HasColumn(table, "account_id") {
+			if err := migrator.RenameColumn(table, "tenant_id", "account_id"); err != nil {
+				return fmt.Errorf("rename %s.tenant_id: %w", table, err)
+			}
 		}
 	}
 	return nil
