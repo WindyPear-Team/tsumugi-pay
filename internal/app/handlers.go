@@ -19,8 +19,9 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type accountRecord struct {
@@ -177,21 +178,19 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 	if err := verifyOPSSignature(input, account.APISecret); err != nil {
 		return paymentResponse{}, clientError{40001, "invalid signature"}
 	}
-	var channelID uuid.UUID
-	var enabled bool
-	var configCiphertext, displayName, token string
-	err = s.db.QueryRow(ctx, `SELECT id,enabled,config_ciphertext,display_name,webhook_token FROM payment_channels WHERE account_id=$1 AND provider=$2`, account.ID, input.PaymentMethod).Scan(&channelID, &enabled, &configCiphertext, &displayName, &token)
+	var channelModel PaymentChannel
+	err = s.db.DB().WithContext(ctx).Where("account_id = ? AND provider = ?", account.ID, input.PaymentMethod).Take(&channelModel).Error
 	if err != nil {
 		return paymentResponse{}, err
 	}
-	if !enabled {
+	if !channelModel.Enabled {
 		return paymentResponse{}, clientError{40003, "payment channel is disabled"}
 	}
-	plain, err := s.decrypt(configCiphertext)
+	plain, err := s.decrypt(channelModel.ConfigCiphertext)
 	if err != nil {
 		return paymentResponse{}, err
 	}
-	channel := channelRecord{ID: channelID, AccountID: account.ID, Provider: input.PaymentMethod, Enabled: enabled, DisplayName: displayName, WebhookToken: token}
+	channel := channelRecord{ID: channelModel.ID, AccountID: account.ID, Provider: input.PaymentMethod, Enabled: channelModel.Enabled, DisplayName: channelModel.DisplayName, WebhookToken: channelModel.WebhookToken}
 	if plain != "" {
 		if err = json.Unmarshal([]byte(plain), &channel.Config); err != nil {
 			return paymentResponse{}, errors.New("stored channel config is invalid")
@@ -212,8 +211,8 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 		return paymentResponse{}, clientError{40003, "unsupported payment scene"}
 	}
 	expires := nowUTC().Add(15 * time.Minute)
-	bill := billRecord{ID: uuid.New(), AccountID: account.ID, ChannelID: channelID, PlatformOrderNo: "TP" + strings.ToUpper(strings.ReplaceAll(uuid.NewString(), "-", ""))[:24], MerchantOrderNo: input.MerchantOrderNo, Subject: input.Subject, Description: input.Description, AmountMinor: amount, Currency: "CNY", Provider: input.PaymentMethod, Scene: scene, Status: "pending", NotifyURL: input.NotifyURL, ReturnURL: input.ReturnURL, Metadata: input.Metadata, ExpiresAt: &expires, CreatedAt: nowUTC(), UpdatedAt: nowUTC()}
-	_, err = s.db.Exec(ctx, `INSERT INTO bills (id,account_id,channel_id,platform_order_no,merchant_order_no,subject,description,amount_minor,currency,provider,scene,status,notify_url,return_url,metadata,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13,$14,$15)`, bill.ID, bill.AccountID, bill.ChannelID, bill.PlatformOrderNo, bill.MerchantOrderNo, bill.Subject, bill.Description, bill.AmountMinor, bill.Currency, bill.Provider, bill.Scene, bill.NotifyURL, nullString(bill.ReturnURL), nullString(bill.Metadata), bill.ExpiresAt)
+	bill := billRecord{ID: uuid.New(), AccountID: account.ID, ChannelID: channelModel.ID, PlatformOrderNo: "TP" + strings.ToUpper(strings.ReplaceAll(uuid.NewString(), "-", ""))[:24], MerchantOrderNo: input.MerchantOrderNo, Subject: input.Subject, Description: input.Description, AmountMinor: amount, Currency: "CNY", Provider: input.PaymentMethod, Scene: scene, Status: "pending", NotifyURL: input.NotifyURL, ReturnURL: input.ReturnURL, Metadata: input.Metadata, ExpiresAt: &expires, CreatedAt: nowUTC(), UpdatedAt: nowUTC()}
+	err = s.db.DB().WithContext(ctx).Create(bill.toModel()).Error
 	if err != nil {
 		if strings.Contains(err.Error(), "bills_account_id_merchant_order_no_key") {
 			return paymentResponse{}, clientError{40006, "duplicate merchant order number"}
@@ -222,11 +221,11 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 	}
 	result, err := s.createPayment(ctx, channel, bill)
 	if err != nil {
-		_, _ = s.db.Exec(ctx, `UPDATE bills SET status='failed',updated_at=NOW() WHERE id=$1`, bill.ID)
+		_ = s.db.DB().WithContext(ctx).Model(&Bill{}).Where("id = ?", bill.ID).Update("status", "failed").Error
 		return paymentResponse{}, fmt.Errorf("payment channel request failed: %w", err)
 	}
 	payload, _ := json.Marshal(result.Raw)
-	_, err = s.db.Exec(ctx, `UPDATE bills SET provider_transaction_id=$2,provider_payload=$3,updated_at=NOW() WHERE id=$1`, bill.ID, nullString(result.ProviderTransactionID), payload)
+	err = s.db.DB().WithContext(ctx).Model(&Bill{}).Where("id = ?", bill.ID).Updates(map[string]any{"provider_transaction_id": nullableString(result.ProviderTransactionID), "provider_payload": string(payload)}).Error
 	if err != nil {
 		return paymentResponse{}, err
 	}
@@ -285,18 +284,15 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	var id uuid.UUID
-	var accountID *uuid.UUID
-	var hash, role, name string
-	var active bool
-	err := s.db.QueryRow(r.Context(), `SELECT id,account_id,password_hash,role,display_name,is_active FROM users WHERE email=$1`, strings.ToLower(strings.TrimSpace(input.Email))).Scan(&id, &accountID, &hash, &role, &name, &active)
-	if err != nil || !active || bcrypt.CompareHashAndPassword([]byte(hash), []byte(input.Password)) != nil {
+	var user User
+	err := s.db.DB().WithContext(r.Context()).Where("email = ?", strings.ToLower(strings.TrimSpace(input.Email))).Take(&user).Error
+	if err != nil || !user.IsActive || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)) != nil {
 		writeError(w, 401, 40103, "invalid email or password", requestID(r))
 		return
 	}
-	claims := jwtClaims{Role: role, Email: strings.ToLower(strings.TrimSpace(input.Email)), RegisteredClaims: jwt.RegisteredClaims{Subject: id.String(), ExpiresAt: jwt.NewNumericDate(time.Now().Add(8 * time.Hour)), IssuedAt: jwt.NewNumericDate(time.Now())}}
-	if accountID != nil {
-		claims.AccountID = accountID.String()
+	claims := jwtClaims{Role: user.Role, Email: strings.ToLower(strings.TrimSpace(input.Email)), RegisteredClaims: jwt.RegisteredClaims{Subject: user.ID.String(), ExpiresAt: jwt.NewNumericDate(time.Now().Add(8 * time.Hour)), IssuedAt: jwt.NewNumericDate(time.Now())}}
+	if user.AccountID != nil {
+		claims.AccountID = user.AccountID.String()
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(s.jwtSecret)
@@ -304,14 +300,14 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, 50001, "cannot issue access token", requestID(r))
 		return
 	}
-	writeJSON(w, 200, map[string]any{"access_token": signed, "token_type": "Bearer", "expires_in": 28800, "user": map[string]any{"id": id, "email": claims.Email, "display_name": name, "role": role, "account_id": accountID}})
+	writeJSON(w, 200, map[string]any{"access_token": signed, "token_type": "Bearer", "expires_in": 28800, "user": map[string]any{"id": user.ID, "email": claims.Email, "display_name": user.DisplayName, "role": user.Role, "account_id": user.AccountID}})
 }
 
 // setupStatus is deliberately minimal: it only reveals whether an initial
 // user needs to be created, never any account metadata.
 func (s *Service) setupStatus(w http.ResponseWriter, r *http.Request) {
-	var users int
-	if err := s.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
+	var users int64
+	if err := s.db.DB().WithContext(r.Context()).Model(&User{}).Count(&users).Error; err != nil {
 		writeError(w, http.StatusInternalServerError, 50001, "cannot determine setup state", requestID(r))
 		return
 	}
@@ -347,29 +343,6 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, 50001, "cannot secure password", requestID(r))
 		return
 	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, 50001, "cannot initialize setup", requestID(r))
-		return
-	}
-	defer tx.Rollback(r.Context())
-	var existingUsers int
-	if err = tx.QueryRow(r.Context(), `SELECT COUNT(*) FROM users`).Scan(&existingUsers); err != nil {
-		writeError(w, http.StatusInternalServerError, 50001, "cannot determine setup state", requestID(r))
-		return
-	}
-	if existingUsers != 0 {
-		writeError(w, http.StatusConflict, 40901, "initial setup has already been completed", requestID(r))
-		return
-	}
-	if _, err = tx.Exec(r.Context(), `INSERT INTO system_settings (setting_key,setting_value) VALUES ($1,$2)`, "oobe_complete", nowUTC().Format(time.RFC3339)); err != nil {
-		if isUniqueViolation(err) {
-			writeError(w, http.StatusConflict, 40901, "initial setup has already been completed", requestID(r))
-			return
-		}
-		writeError(w, http.StatusInternalServerError, 50001, "cannot reserve setup", requestID(r))
-		return
-	}
 	adminID := uuid.New()
 	accountID := uuid.New()
 	apiSecret := randomToken(32)
@@ -380,16 +353,28 @@ func (s *Service) setupInitialize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, 50001, "cannot secure account credentials", requestID(r))
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `INSERT INTO accounts (id,name,merchant_no,api_secret_ciphertext,callback_secret_ciphertext) VALUES ($1,$2,$3,$4,$5)`, accountID, input.AccountName, input.MerchantNo, apiCiphertext, callbackCiphertext); err != nil {
-		writeError(w, http.StatusConflict, 40006, "merchant number already exists", requestID(r))
-		return
-	}
-	if _, err = tx.Exec(r.Context(), `INSERT INTO users (id,account_id,email,password_hash,display_name,role) VALUES ($1,$2,$3,$4,$5,'user')`, adminID, accountID, input.Email, string(hash), input.DisplayName); err != nil {
-		writeError(w, http.StatusInternalServerError, 50001, "cannot create initial user", requestID(r))
-		return
-	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, 50001, "cannot complete setup", requestID(r))
+	err = s.db.DB().WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		var existingUsers int64
+		if err := tx.Model(&User{}).Count(&existingUsers).Error; err != nil {
+			return err
+		}
+		if existingUsers != 0 {
+			return errSetupComplete
+		}
+		if err := tx.Create(&SystemSetting{SettingKey: "oobe_complete", SettingValue: nowUTC().Format(time.RFC3339)}).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&Account{ID: accountID, Name: input.AccountName, MerchantNo: input.MerchantNo, APISecretCiphertext: apiCiphertext, CallbackSecretCiphertext: callbackCiphertext}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&User{ID: adminID, AccountID: &accountID, Email: input.Email, PasswordHash: string(hash), DisplayName: input.DisplayName, Role: "user", IsActive: true}).Error
+	})
+	if err != nil {
+		if errors.Is(err, errSetupComplete) || isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, 40901, "initial setup has already been completed", requestID(r))
+		} else {
+			writeError(w, http.StatusInternalServerError, 50001, "cannot complete setup", requestID(r))
+		}
 		return
 	}
 	s.audit(r.Context(), &accountID, &adminID, "system.oobe_complete", "account", accountID.String(), requestID(r), map[string]string{"email": input.Email, "account_name": input.AccountName})
@@ -454,8 +439,8 @@ func (s *Service) adminMe(w http.ResponseWriter, r *http.Request) {
 	p := currentPrincipal(r)
 	response := map[string]any{"id": p.UserID, "email": p.Email, "role": p.Role, "account_id": p.AccountID}
 	if p.AccountID != nil {
-		var account struct{ Name, MerchantNo, Status string }
-		if err := s.db.QueryRow(r.Context(), `SELECT name,merchant_no,status FROM accounts WHERE id=$1`, *p.AccountID).Scan(&account.Name, &account.MerchantNo, &account.Status); err == nil {
+		var account Account
+		if err := s.db.DB().WithContext(r.Context()).Select("name", "merchant_no", "status").Take(&account, "id = ?", *p.AccountID).Error; err == nil {
 			response["account"] = map[string]any{"id": p.AccountID, "name": account.Name, "merchant_no": account.MerchantNo, "status": account.Status}
 		}
 	}
@@ -519,10 +504,11 @@ func (s *Service) patchSiteSettings(w http.ResponseWriter, r *http.Request) {
 			oidcCiphertext, err = s.encryptConfig(settings.OIDC)
 		}
 		if err == nil {
+			settingsModel := AccountSetting{AccountID: *accountID, EmailConfigCiphertext: emailCiphertext, HCaptchaConfigCiphertext: hcaptchaCiphertext, OIDCConfigCiphertext: oidcCiphertext}
 			if exists {
-				_, err = s.db.Exec(r.Context(), `UPDATE account_settings SET email_config_ciphertext=$2,hcaptcha_config_ciphertext=$3,oidc_config_ciphertext=$4,updated_at=NOW() WHERE account_id=$1`, *accountID, emailCiphertext, hcaptchaCiphertext, oidcCiphertext)
+				err = s.db.DB().WithContext(r.Context()).Save(&settingsModel).Error
 			} else {
-				_, err = s.db.Exec(r.Context(), `INSERT INTO account_settings (account_id,email_config_ciphertext,hcaptcha_config_ciphertext,oidc_config_ciphertext) VALUES ($1,$2,$3,$4)`, *accountID, emailCiphertext, hcaptchaCiphertext, oidcCiphertext)
+				err = s.db.DB().WithContext(r.Context()).Create(&settingsModel).Error
 			}
 		}
 	}
@@ -552,8 +538,8 @@ func (s *Service) siteSettingsAccount(w http.ResponseWriter, r *http.Request) (*
 }
 
 func (s *Service) loadAccountSettings(ctx context.Context, accountID uuid.UUID) (accountSiteSettings, bool, error) {
-	var encryptedEmail, encryptedHCaptcha, encryptedOIDC string
-	err := s.db.QueryRow(ctx, `SELECT email_config_ciphertext,hcaptcha_config_ciphertext,oidc_config_ciphertext FROM account_settings WHERE account_id=$1`, accountID).Scan(&encryptedEmail, &encryptedHCaptcha, &encryptedOIDC)
+	var setting AccountSetting
+	err := s.db.DB().WithContext(ctx).Take(&setting, "account_id = ?", accountID).Error
 	if isNoRows(err) {
 		return accountSiteSettings{}, false, nil
 	}
@@ -561,13 +547,13 @@ func (s *Service) loadAccountSettings(ctx context.Context, accountID uuid.UUID) 
 		return accountSiteSettings{}, false, err
 	}
 	settings := accountSiteSettings{}
-	if err = s.decryptConfig(encryptedEmail, &settings.Email); err != nil {
+	if err = s.decryptConfig(setting.EmailConfigCiphertext, &settings.Email); err != nil {
 		return settings, true, err
 	}
-	if err = s.decryptConfig(encryptedHCaptcha, &settings.HCaptcha); err != nil {
+	if err = s.decryptConfig(setting.HCaptchaConfigCiphertext, &settings.HCaptcha); err != nil {
 		return settings, true, err
 	}
-	if err = s.decryptConfig(encryptedOIDC, &settings.OIDC); err != nil {
+	if err = s.decryptConfig(setting.OIDCConfigCiphertext, &settings.OIDC); err != nil {
 		return settings, true, err
 	}
 	return settings, true, nil
@@ -603,20 +589,16 @@ func (s *Service) dashboard(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var total, pending, paid, refunded int64
-	var volume int64
-	query := `SELECT COUNT(*),COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status='refunded' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status='paid' THEN amount_minor ELSE 0 END),0) FROM bills`
-	args := []any{}
+	var stats struct{ Total, Pending, Paid, Refunded, Volume int64 }
+	query := s.db.DB().WithContext(r.Context()).Model(&Bill{}).Select("COUNT(*) AS total, COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending, COALESCE(SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END), 0) AS paid, COALESCE(SUM(CASE WHEN status = 'refunded' THEN 1 ELSE 0 END), 0) AS refunded, COALESCE(SUM(CASE WHEN status = 'paid' THEN amount_minor ELSE 0 END), 0) AS volume")
 	if accountID != nil {
-		query += " WHERE account_id=$1"
-		args = append(args, *accountID)
+		query = query.Where("account_id = ?", *accountID)
 	}
-	err := s.db.QueryRow(r.Context(), query, args...).Scan(&total, &pending, &paid, &refunded, &volume)
-	if err != nil {
+	if err := query.Scan(&stats).Error; err != nil {
 		writeError(w, 500, 50001, "cannot load dashboard", requestID(r))
 		return
 	}
-	writeJSON(w, 200, map[string]any{"total_bills": total, "pending_bills": pending, "paid_bills": paid, "refunded_bills": refunded, "paid_volume": moneyString(volume)})
+	writeJSON(w, 200, map[string]any{"total_bills": stats.Total, "pending_bills": stats.Pending, "paid_bills": stats.Paid, "refunded_bills": stats.Refunded, "paid_volume": moneyString(stats.Volume)})
 }
 func (s *Service) scopedAccount(w http.ResponseWriter, r *http.Request) (*uuid.UUID, bool) {
 	p := currentPrincipal(r)
@@ -641,20 +623,14 @@ func (s *Service) listAccounts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, 40301, "platform administrator required", requestID(r))
 		return
 	}
-	rows, err := s.db.Query(r.Context(), `SELECT id,name,merchant_no,status,created_at FROM accounts ORDER BY created_at DESC`)
-	if err != nil {
+	var accounts []Account
+	if err := s.db.DB().WithContext(r.Context()).Order("created_at DESC").Find(&accounts).Error; err != nil {
 		writeError(w, 500, 50001, "cannot load accounts", requestID(r))
 		return
 	}
-	defer rows.Close()
 	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id uuid.UUID
-		var name, no, status string
-		var created time.Time
-		if rows.Scan(&id, &name, &no, &status, &created) == nil {
-			items = append(items, map[string]any{"id": id, "name": name, "merchant_no": no, "status": status, "created_at": created})
-		}
+	for _, account := range accounts {
+		items = append(items, map[string]any{"id": account.ID, "name": account.Name, "merchant_no": account.MerchantNo, "status": account.Status, "created_at": account.CreatedAt})
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
@@ -688,7 +664,7 @@ func (s *Service) createAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := uuid.New()
-	_, err = s.db.Exec(r.Context(), `INSERT INTO accounts (id,name,merchant_no,api_secret_ciphertext,callback_secret_ciphertext) VALUES ($1,$2,$3,$4,$5)`, id, input.Name, input.MerchantNo, api, callback)
+	err = s.db.DB().WithContext(r.Context()).Create(&Account{ID: id, Name: input.Name, MerchantNo: input.MerchantNo, APISecretCiphertext: api, CallbackSecretCiphertext: callback}).Error
 	if err != nil {
 		writeError(w, 409, 40006, "merchant number already exists", requestID(r))
 		return
@@ -720,19 +696,34 @@ func (s *Service) patchAccount(w http.ResponseWriter, r *http.Request, idText st
 		writeError(w, 400, 40002, "invalid account status", requestID(r))
 		return
 	}
+	updates := map[string]any{}
 	if input.Name != nil {
-		_, _ = s.db.Exec(r.Context(), `UPDATE accounts SET name=$2,updated_at=NOW() WHERE id=$1`, id, *input.Name)
+		updates["name"] = *input.Name
 	}
 	if input.Status != nil {
-		_, _ = s.db.Exec(r.Context(), `UPDATE accounts SET status=$2,updated_at=NOW() WHERE id=$1`, id, *input.Status)
+		updates["status"] = *input.Status
 	}
 	if input.APISecret != nil {
-		value, _ := s.encrypt(*input.APISecret)
-		_, _ = s.db.Exec(r.Context(), `UPDATE accounts SET api_secret_ciphertext=$2,updated_at=NOW() WHERE id=$1`, id, value)
+		value, encryptErr := s.encrypt(*input.APISecret)
+		if encryptErr != nil {
+			writeError(w, 500, 50001, "cannot secure secret", requestID(r))
+			return
+		}
+		updates["api_secret_ciphertext"] = value
 	}
 	if input.CallbackSecret != nil {
-		value, _ := s.encrypt(*input.CallbackSecret)
-		_, _ = s.db.Exec(r.Context(), `UPDATE accounts SET callback_secret_ciphertext=$2,updated_at=NOW() WHERE id=$1`, id, value)
+		value, encryptErr := s.encrypt(*input.CallbackSecret)
+		if encryptErr != nil {
+			writeError(w, 500, 50001, "cannot secure secret", requestID(r))
+			return
+		}
+		updates["callback_secret_ciphertext"] = value
+	}
+	if len(updates) > 0 {
+		if err := s.db.DB().WithContext(r.Context()).Model(&Account{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			writeError(w, 500, 50001, "cannot update account", requestID(r))
+			return
+		}
 	}
 	s.audit(r.Context(), &id, &p.UserID, "account.update", "account", id.String(), requestID(r), map[string]any{"secret_rotated": input.APISecret != nil || input.CallbackSecret != nil})
 	w.WriteHeader(http.StatusNoContent)
@@ -747,21 +738,14 @@ func (s *Service) listChannels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, 40002, "select a account through X-Account-ID", requestID(r))
 		return
 	}
-	rows, err := s.db.Query(r.Context(), `SELECT id,provider,display_name,enabled,config_ciphertext,webhook_token,updated_at FROM payment_channels WHERE account_id=$1 ORDER BY provider`, accountID)
-	if err != nil {
+	var channels []PaymentChannel
+	if err := s.db.DB().WithContext(r.Context()).Where("account_id = ?", *accountID).Order("provider").Find(&channels).Error; err != nil {
 		writeError(w, 500, 50001, "cannot load channels", requestID(r))
 		return
 	}
-	defer rows.Close()
 	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id uuid.UUID
-		var provider, name, ciphertext, token string
-		var enabled bool
-		var updated time.Time
-		if rows.Scan(&id, &provider, &name, &enabled, &ciphertext, &token, &updated) == nil {
-			items = append(items, map[string]any{"id": id, "provider": provider, "display_name": name, "enabled": enabled, "configured": ciphertext != "", "webhook_url": fmt.Sprintf("%s/api/v1/webhooks/%s/%s", s.baseURL, provider, token), "updated_at": updated})
-		}
+	for _, channel := range channels {
+		items = append(items, map[string]any{"id": channel.ID, "provider": channel.Provider, "display_name": channel.DisplayName, "enabled": channel.Enabled, "configured": channel.ConfigCiphertext != "", "webhook_url": fmt.Sprintf("%s/api/v1/webhooks/%s/%s", s.baseURL, channel.Provider, channel.WebhookToken), "updated_at": channel.UpdatedAt})
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
@@ -795,7 +779,7 @@ func (s *Service) createChannel(w http.ResponseWriter, r *http.Request) {
 		input.DisplayName = map[string]string{"alipay": "支付宝", "wechat": "微信支付"}[input.Provider]
 	}
 	channelID := uuid.New()
-	_, err := s.db.Exec(r.Context(), `INSERT INTO payment_channels (id,account_id,provider,display_name,webhook_token) VALUES ($1,$2,$3,$4,$5)`, channelID, *accountID, input.Provider, input.DisplayName, randomToken(24))
+	err := s.db.DB().WithContext(r.Context()).Create(&PaymentChannel{ID: channelID, AccountID: *accountID, Provider: input.Provider, DisplayName: input.DisplayName, WebhookToken: randomToken(24)}).Error
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, 40006, "this payment provider has already been added", requestID(r))
@@ -826,19 +810,19 @@ func (s *Service) patchChannel(w http.ResponseWriter, r *http.Request, idText st
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	var accountID uuid.UUID
-	var provider string
-	err = s.db.QueryRow(r.Context(), `SELECT account_id,provider FROM payment_channels WHERE id=$1`, channelID).Scan(&accountID, &provider)
+	var channel PaymentChannel
+	err = s.db.DB().WithContext(r.Context()).Take(&channel, "id = ?", channelID).Error
 	if err != nil {
 		writeError(w, 404, 40401, "channel not found", requestID(r))
 		return
 	}
-	if !s.mayAccessAccount(p, accountID) {
+	if !s.mayAccessAccount(p, channel.AccountID) {
 		writeError(w, 403, 40301, "account access denied", requestID(r))
 		return
 	}
+	updates := map[string]any{}
 	if input.DisplayName != nil {
-		_, _ = s.db.Exec(r.Context(), `UPDATE payment_channels SET display_name=$2,updated_at=NOW() WHERE id=$1`, channelID, *input.DisplayName)
+		updates["display_name"] = *input.DisplayName
 	}
 	if input.Config != nil {
 		var config providerConfig
@@ -846,7 +830,7 @@ func (s *Service) patchChannel(w http.ResponseWriter, r *http.Request, idText st
 			writeError(w, 400, 40002, "invalid provider config", requestID(r))
 			return
 		}
-		if err = validateProviderConfig(provider, config); err != nil {
+		if err = validateProviderConfig(channel.Provider, config); err != nil {
 			writeError(w, 400, 40002, err.Error(), requestID(r))
 			return
 		}
@@ -855,20 +839,25 @@ func (s *Service) patchChannel(w http.ResponseWriter, r *http.Request, idText st
 			writeError(w, 500, 50001, "cannot secure channel config", requestID(r))
 			return
 		}
-		_, _ = s.db.Exec(r.Context(), `UPDATE payment_channels SET config_ciphertext=$2,updated_at=NOW() WHERE id=$1`, channelID, encrypted)
+		updates["config_ciphertext"] = encrypted
+		channel.ConfigCiphertext = encrypted
 	}
 	if input.Enabled != nil {
 		if *input.Enabled {
-			var ciphertext string
-			_ = s.db.QueryRow(r.Context(), `SELECT config_ciphertext FROM payment_channels WHERE id=$1`, channelID).Scan(&ciphertext)
-			if ciphertext == "" {
+			if channel.ConfigCiphertext == "" {
 				writeError(w, 400, 40002, "configure channel credentials before enabling", requestID(r))
 				return
 			}
 		}
-		_, _ = s.db.Exec(r.Context(), `UPDATE payment_channels SET enabled=$2,updated_at=NOW() WHERE id=$1`, channelID, *input.Enabled)
+		updates["enabled"] = *input.Enabled
 	}
-	s.audit(r.Context(), &accountID, &p.UserID, "channel.update", "payment_channel", channelID.String(), requestID(r), map[string]any{"provider": provider, "config_updated": input.Config != nil, "enabled": input.Enabled})
+	if len(updates) > 0 {
+		if err := s.db.DB().WithContext(r.Context()).Model(&PaymentChannel{}).Where("id = ?", channelID).Updates(updates).Error; err != nil {
+			writeError(w, 500, 50001, "cannot update payment channel", requestID(r))
+			return
+		}
+	}
+	s.audit(r.Context(), &channel.AccountID, &p.UserID, "channel.update", "payment_channel", channelID.String(), requestID(r), map[string]any{"provider": channel.Provider, "config_updated": input.Config != nil, "enabled": input.Enabled})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -877,29 +866,21 @@ func (s *Service) listBills(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	args := []any{}
-	query := `SELECT id,account_id,channel_id,platform_order_no,merchant_order_no,subject,description,amount_minor,currency,provider,scene,status,COALESCE(provider_transaction_id,''),notify_url,COALESCE(return_url,''),COALESCE(metadata,''),expires_at,paid_at,closed_at,created_at,updated_at FROM bills WHERE 1=1`
+	query := s.db.DB().WithContext(r.Context()).Order("created_at DESC").Limit(100)
 	if accountID != nil {
-		args = append(args, *accountID)
-		query += " AND account_id=$1"
+		query = query.Where("account_id = ?", *accountID)
 	}
 	if status := r.URL.Query().Get("status"); status != "" {
-		args = append(args, status)
-		query += fmt.Sprintf(" AND status=$%d", len(args))
+		query = query.Where("status = ?", status)
 	}
-	query += " ORDER BY created_at DESC LIMIT 100"
-	rows, err := s.db.Query(r.Context(), query, args...)
-	if err != nil {
+	var models []Bill
+	if err := query.Find(&models).Error; err != nil {
 		writeError(w, 500, 50001, "cannot load bills", requestID(r))
 		return
 	}
-	defer rows.Close()
 	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var bill billRecord
-		if scanBill(rows, &bill) == nil {
-			items = append(items, billPublic(bill))
-		}
+	for _, model := range models {
+		items = append(items, billPublic(billRecordFromModel(model)))
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
@@ -962,7 +943,7 @@ func (s *Service) createRefund(w http.ResponseWriter, r *http.Request, billText 
 		return
 	}
 	refund := refundRecord{ID: uuid.New(), AccountID: bill.AccountID, BillID: bill.ID, RefundOrderNo: input.RefundOrderNo, AmountMinor: amount, Reason: input.Reason, Status: "pending", CreatedAt: nowUTC()}
-	_, err = s.db.Exec(r.Context(), `INSERT INTO refunds (id,account_id,bill_id,refund_order_no,amount_minor,reason) VALUES ($1,$2,$3,$4,$5,$6)`, refund.ID, refund.AccountID, refund.BillID, refund.RefundOrderNo, refund.AmountMinor, refund.Reason)
+	err = s.db.DB().WithContext(r.Context()).Create(refund.toModel()).Error
 	if err != nil {
 		writeError(w, 409, 40006, "duplicate refund order number", requestID(r))
 		return
@@ -974,13 +955,13 @@ func (s *Service) createRefund(w http.ResponseWriter, r *http.Request, billText 
 	}
 	tradeID, payload, err := s.refundPayment(r.Context(), channel, bill, refund)
 	if err != nil {
-		_, _ = s.db.Exec(r.Context(), `UPDATE refunds SET status='failed',updated_at=NOW() WHERE id=$1`, refund.ID)
+		_ = s.db.DB().WithContext(r.Context()).Model(&Refund{}).Where("id = ?", refund.ID).Update("status", "failed").Error
 		writeError(w, 502, 50001, "refund channel request failed", requestID(r))
 		return
 	}
 	data, _ := json.Marshal(payload)
-	_, _ = s.db.Exec(r.Context(), `UPDATE refunds SET status='succeeded',provider_refund_id=$2,provider_payload=$3,updated_at=NOW() WHERE id=$1`, refund.ID, nullString(tradeID), data)
-	_, _ = s.db.Exec(r.Context(), `UPDATE bills SET status='refunded',updated_at=NOW() WHERE id=$1`, bill.ID)
+	_ = s.db.DB().WithContext(r.Context()).Model(&Refund{}).Where("id = ?", refund.ID).Updates(map[string]any{"status": "succeeded", "provider_refund_id": nullableString(tradeID), "provider_payload": string(data)}).Error
+	_ = s.db.DB().WithContext(r.Context()).Model(&Bill{}).Where("id = ?", bill.ID).Update("status", "refunded").Error
 	s.audit(r.Context(), &bill.AccountID, &p.UserID, "bill.refund", "bill", bill.ID.String(), requestID(r), map[string]any{"refund_order_no": input.RefundOrderNo, "amount": input.Amount})
 	writeJSON(w, 201, map[string]any{"id": refund.ID, "status": "succeeded"})
 }
@@ -1017,7 +998,7 @@ func (s *Service) closeBill(w http.ResponseWriter, r *http.Request, billText str
 		writeError(w, 502, 50001, "close channel request failed", requestID(r))
 		return
 	}
-	_, _ = s.db.Exec(r.Context(), `UPDATE bills SET status='closed',closed_at=NOW(),updated_at=NOW() WHERE id=$1 AND status='pending'`, bill.ID)
+	_ = s.db.DB().WithContext(r.Context()).Model(&Bill{}).Where("id = ? AND status = ?", bill.ID, "pending").Updates(map[string]any{"status": "closed", "closed_at": nowUTC()}).Error
 	s.audit(r.Context(), &bill.AccountID, &p.UserID, "bill.close", "bill", bill.ID.String(), requestID(r), map[string]any{})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1026,25 +1007,18 @@ func (s *Service) listRefunds(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	query := `SELECT id,account_id,bill_id,refund_order_no,amount_minor,reason,status,COALESCE(provider_refund_id,''),created_at FROM refunds`
-	args := []any{}
+	query := s.db.DB().WithContext(r.Context()).Order("created_at DESC").Limit(100)
 	if accountID != nil {
-		query += " WHERE account_id=$1"
-		args = append(args, *accountID)
+		query = query.Where("account_id = ?", *accountID)
 	}
-	query += " ORDER BY created_at DESC LIMIT 100"
-	rows, err := s.db.Query(r.Context(), query, args...)
-	if err != nil {
+	var refunds []Refund
+	if err := query.Find(&refunds).Error; err != nil {
 		writeError(w, 500, 50001, "cannot load refunds", requestID(r))
 		return
 	}
-	defer rows.Close()
 	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var item refundRecord
-		if rows.Scan(&item.ID, &item.AccountID, &item.BillID, &item.RefundOrderNo, &item.AmountMinor, &item.Reason, &item.Status, &item.ProviderRefundID, &item.CreatedAt) == nil {
-			items = append(items, map[string]any{"id": item.ID, "bill_id": item.BillID, "refund_order_no": item.RefundOrderNo, "amount": moneyString(item.AmountMinor), "reason": item.Reason, "status": item.Status, "provider_refund_id": item.ProviderRefundID, "created_at": item.CreatedAt})
-		}
+	for _, item := range refunds {
+		items = append(items, map[string]any{"id": item.ID, "bill_id": item.BillID, "refund_order_no": item.RefundOrderNo, "amount": moneyString(item.AmountMinor), "reason": item.Reason, "status": item.Status, "provider_refund_id": item.ProviderRefundID, "created_at": item.CreatedAt})
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
@@ -1053,31 +1027,20 @@ func (s *Service) listAuditLogs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	query := `SELECT id,account_id,actor_user_id,action,target_type,target_id,request_id,detail,created_at FROM audit_logs`
-	args := []any{}
+	query := s.db.DB().WithContext(r.Context()).Order("created_at DESC").Limit(100)
 	if accountID != nil {
-		query += " WHERE account_id=$1"
-		args = append(args, *accountID)
+		query = query.Where("account_id = ?", *accountID)
 	}
-	query += " ORDER BY created_at DESC LIMIT 100"
-	rows, err := s.db.Query(r.Context(), query, args...)
-	if err != nil {
+	var logs []AuditLog
+	if err := query.Find(&logs).Error; err != nil {
 		writeError(w, 500, 50001, "cannot load audit logs", requestID(r))
 		return
 	}
-	defer rows.Close()
 	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id uuid.UUID
-		var tid, uid *uuid.UUID
-		var action, targetType, targetID, rid string
-		var detail []byte
-		var created time.Time
-		if rows.Scan(&id, &tid, &uid, &action, &targetType, &targetID, &rid, &detail, &created) == nil {
-			var parsed any
-			_ = json.Unmarshal(detail, &parsed)
-			items = append(items, map[string]any{"id": id, "account_id": tid, "actor_user_id": uid, "action": action, "target_type": targetType, "target_id": targetID, "request_id": rid, "detail": parsed, "created_at": created})
-		}
+	for _, log := range logs {
+		var parsed any
+		_ = json.Unmarshal([]byte(log.Detail), &parsed)
+		items = append(items, map[string]any{"id": log.ID, "account_id": log.AccountID, "actor_user_id": log.ActorUserID, "action": log.Action, "target_type": log.TargetType, "target_id": log.TargetID, "request_id": log.RequestID, "detail": parsed, "created_at": log.CreatedAt})
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
@@ -1138,47 +1101,38 @@ func (s *Service) processWechatWebhook(w http.ResponseWriter, r *http.Request, t
 }
 func (s *Service) applyWebhook(ctx context.Context, channel channelRecord, result webhookResult) error {
 	raw, _ := json.Marshal(result.Raw)
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	tag, err := tx.Exec(ctx, `INSERT INTO webhook_events (id,account_id,channel_id,provider,event_key,verified,payload,processed_at) VALUES ($1,$2,$3,$4,$5,true,$6,NOW())`, uuid.New(), channel.AccountID, channel.ID, channel.Provider, result.EventKey, raw)
-	if err != nil {
-		if isUniqueViolation(err) {
-			return tx.Commit(ctx)
-		}
-		return err
-	}
-	affected, err := tag.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return tx.Commit(ctx)
-	}
-	if !result.Paid {
-		return tx.Commit(ctx)
-	}
 	var bill billRecord
-	err = tx.QueryRow(ctx, `SELECT id,account_id,channel_id,platform_order_no,merchant_order_no,subject,description,amount_minor,currency,provider,scene,status,COALESCE(provider_transaction_id,''),notify_url,COALESCE(return_url,''),COALESCE(metadata,''),expires_at,paid_at,closed_at,created_at,updated_at FROM bills WHERE account_id=$1 AND merchant_order_no=$2 FOR UPDATE`, channel.AccountID, result.MerchantOrderNo).Scan(&bill.ID, &bill.AccountID, &bill.ChannelID, &bill.PlatformOrderNo, &bill.MerchantOrderNo, &bill.Subject, &bill.Description, &bill.AmountMinor, &bill.Currency, &bill.Provider, &bill.Scene, &bill.Status, &bill.ProviderTransactionID, &bill.NotifyURL, &bill.ReturnURL, &bill.Metadata, &bill.ExpiresAt, &bill.PaidAt, &bill.ClosedAt, &bill.CreatedAt, &bill.UpdatedAt)
-	if err != nil {
-		return err
-	}
-	if bill.Status == "pending" {
-		_, err = tx.Exec(ctx, `UPDATE bills SET status='paid',provider_transaction_id=$2,provider_payload=$3,paid_at=NOW(),updated_at=NOW() WHERE id=$1`, bill.ID, nullString(result.ProviderTradeID), raw)
-		if err != nil {
+	notify := false
+	err := s.db.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		event := WebhookEvent{ID: uuid.New(), AccountID: channel.AccountID, ChannelID: channel.ID, Provider: channel.Provider, EventKey: result.EventKey, Verified: true, Payload: string(raw), ProcessedAt: timePtr(nowUTC())}
+		if err := tx.Create(&event).Error; err != nil {
+			if isUniqueViolation(err) {
+				return nil
+			}
 			return err
 		}
-		bill.Status = "paid"
-		bill.ProviderTransactionID = result.ProviderTradeID
+		if !result.Paid {
+			return nil
+		}
+		var model Bill
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("account_id = ? AND merchant_order_no = ?", channel.AccountID, result.MerchantOrderNo).Take(&model).Error; err != nil {
+			return err
+		}
+		bill = billRecordFromModel(model)
+		if bill.Status != "pending" {
+			return nil
+		}
 		paid := nowUTC()
-		bill.PaidAt = &paid
-	}
-	if err = tx.Commit(ctx); err != nil {
+		if err := tx.Model(&Bill{}).Where("id = ?", bill.ID).Updates(map[string]any{"status": "paid", "provider_transaction_id": nullableString(result.ProviderTradeID), "provider_payload": string(raw), "paid_at": paid}).Error; err != nil {
+			return err
+		}
+		bill.Status, bill.ProviderTransactionID, bill.PaidAt, notify = "paid", result.ProviderTradeID, &paid, true
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	if bill.Status == "paid" {
+	if notify {
 		go s.notifyMerchant(context.Background(), bill)
 	}
 	return nil
@@ -1186,12 +1140,11 @@ func (s *Service) applyWebhook(ctx context.Context, channel channelRecord, resul
 func (s *Service) notifyMerchant(ctx context.Context, bill billRecord) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	var encrypted string
-	err := s.db.QueryRow(ctx, `SELECT callback_secret_ciphertext FROM accounts WHERE id=$1`, bill.AccountID).Scan(&encrypted)
-	if err != nil {
+	var account Account
+	if err := s.db.DB().WithContext(ctx).Select("callback_secret_ciphertext").Take(&account, "id = ?", bill.AccountID).Error; err != nil {
 		return
 	}
-	secret, err := s.decrypt(encrypted)
+	secret, err := s.decrypt(account.CallbackSecretCiphertext)
 	if err != nil {
 		return
 	}
@@ -1208,33 +1161,33 @@ func (s *Service) notifyMerchant(ctx context.Context, bill billRecord) {
 	}
 }
 func (s *Service) merchantNo(ctx context.Context, accountID uuid.UUID) string {
-	var value string
-	_ = s.db.QueryRow(ctx, `SELECT merchant_no FROM accounts WHERE id=$1`, accountID).Scan(&value)
-	return value
+	var account Account
+	_ = s.db.DB().WithContext(ctx).Select("merchant_no").Take(&account, "id = ?", accountID).Error
+	return account.MerchantNo
 }
 
 func (s *Service) accountByMerchantNo(ctx context.Context, no string) (accountRecord, error) {
-	var encryptedAPI, encryptedCallback string
-	var account accountRecord
-	err := s.db.QueryRow(ctx, `SELECT id,name,merchant_no,status,api_secret_ciphertext,callback_secret_ciphertext,created_at FROM accounts WHERE merchant_no=$1 AND status='active'`, no).Scan(&account.ID, &account.Name, &account.MerchantNo, &account.Status, &encryptedAPI, &encryptedCallback, &account.CreatedAt)
+	var model Account
+	err := s.db.DB().WithContext(ctx).Where("merchant_no = ? AND status = ?", no, "active").Take(&model).Error
+	if err != nil {
+		return accountRecord{}, err
+	}
+	account := accountRecord{ID: model.ID, Name: model.Name, MerchantNo: model.MerchantNo, Status: model.Status, CreatedAt: model.CreatedAt}
+	account.APISecret, err = s.decrypt(model.APISecretCiphertext)
 	if err != nil {
 		return account, err
 	}
-	account.APISecret, err = s.decrypt(encryptedAPI)
-	if err != nil {
-		return account, err
-	}
-	account.CallbackSecret, err = s.decrypt(encryptedCallback)
+	account.CallbackSecret, err = s.decrypt(model.CallbackSecretCiphertext)
 	return account, err
 }
 func (s *Service) channelByID(ctx context.Context, id uuid.UUID) (channelRecord, error) {
-	var c channelRecord
-	var encrypted string
-	err := s.db.QueryRow(ctx, `SELECT id,account_id,provider,display_name,enabled,config_ciphertext,webhook_token FROM payment_channels WHERE id=$1`, id).Scan(&c.ID, &c.AccountID, &c.Provider, &c.DisplayName, &c.Enabled, &encrypted, &c.WebhookToken)
+	var model PaymentChannel
+	err := s.db.DB().WithContext(ctx).Take(&model, "id = ?", id).Error
 	if err != nil {
-		return c, err
+		return channelRecord{}, err
 	}
-	plain, err := s.decrypt(encrypted)
+	c := channelRecord{ID: model.ID, AccountID: model.AccountID, Provider: model.Provider, DisplayName: model.DisplayName, Enabled: model.Enabled, WebhookToken: model.WebhookToken}
+	plain, err := s.decrypt(model.ConfigCiphertext)
 	if err != nil {
 		return c, err
 	}
@@ -1244,17 +1197,14 @@ func (s *Service) channelByID(ctx context.Context, id uuid.UUID) (channelRecord,
 	return c, err
 }
 func (s *Service) billByID(ctx context.Context, id uuid.UUID) (billRecord, error) {
-	var bill billRecord
-	err := s.db.QueryRow(ctx, `SELECT id,account_id,channel_id,platform_order_no,merchant_order_no,subject,description,amount_minor,currency,provider,scene,status,COALESCE(provider_transaction_id,''),notify_url,COALESCE(return_url,''),COALESCE(metadata,''),expires_at,paid_at,closed_at,created_at,updated_at FROM bills WHERE id=$1`, id).Scan(&bill.ID, &bill.AccountID, &bill.ChannelID, &bill.PlatformOrderNo, &bill.MerchantOrderNo, &bill.Subject, &bill.Description, &bill.AmountMinor, &bill.Currency, &bill.Provider, &bill.Scene, &bill.Status, &bill.ProviderTransactionID, &bill.NotifyURL, &bill.ReturnURL, &bill.Metadata, &bill.ExpiresAt, &bill.PaidAt, &bill.ClosedAt, &bill.CreatedAt, &bill.UpdatedAt)
-	return bill, err
+	var model Bill
+	err := s.db.DB().WithContext(ctx).Take(&model, "id = ?", id).Error
+	return billRecordFromModel(model), err
 }
 func (s *Service) billByMerchantOrder(ctx context.Context, accountID uuid.UUID, orderNo string) (billRecord, error) {
-	var bill billRecord
-	err := s.db.QueryRow(ctx, `SELECT id,account_id,channel_id,platform_order_no,merchant_order_no,subject,description,amount_minor,currency,provider,scene,status,COALESCE(provider_transaction_id,''),notify_url,COALESCE(return_url,''),COALESCE(metadata,''),expires_at,paid_at,closed_at,created_at,updated_at FROM bills WHERE account_id=$1 AND merchant_order_no=$2`, accountID, orderNo).Scan(&bill.ID, &bill.AccountID, &bill.ChannelID, &bill.PlatformOrderNo, &bill.MerchantOrderNo, &bill.Subject, &bill.Description, &bill.AmountMinor, &bill.Currency, &bill.Provider, &bill.Scene, &bill.Status, &bill.ProviderTransactionID, &bill.NotifyURL, &bill.ReturnURL, &bill.Metadata, &bill.ExpiresAt, &bill.PaidAt, &bill.ClosedAt, &bill.CreatedAt, &bill.UpdatedAt)
-	return bill, err
-}
-func scanBill(row pgx.Row, b *billRecord) error {
-	return row.Scan(&b.ID, &b.AccountID, &b.ChannelID, &b.PlatformOrderNo, &b.MerchantOrderNo, &b.Subject, &b.Description, &b.AmountMinor, &b.Currency, &b.Provider, &b.Scene, &b.Status, &b.ProviderTransactionID, &b.NotifyURL, &b.ReturnURL, &b.Metadata, &b.ExpiresAt, &b.PaidAt, &b.ClosedAt, &b.CreatedAt, &b.UpdatedAt)
+	var model Bill
+	err := s.db.DB().WithContext(ctx).Where("account_id = ? AND merchant_order_no = ?", accountID, orderNo).Take(&model).Error
+	return billRecordFromModel(model), err
 }
 func billPublic(b billRecord) map[string]any {
 	return map[string]any{"id": b.ID, "platform_order_no": b.PlatformOrderNo, "merchant_order_no": b.MerchantOrderNo, "subject": b.Subject, "description": b.Description, "amount": moneyString(b.AmountMinor), "currency": b.Currency, "provider": b.Provider, "scene": b.Scene, "status": b.Status, "provider_transaction_id": b.ProviderTransactionID, "notify_url": b.NotifyURL, "return_url": b.ReturnURL, "metadata": b.Metadata, "expires_at": b.ExpiresAt, "paid_at": b.PaidAt, "closed_at": b.ClosedAt, "created_at": b.CreatedAt, "updated_at": b.UpdatedAt}
@@ -1377,10 +1327,30 @@ func writePublicError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	writeError(w, 502, 50001, "payment service unavailable", requestID(r))
 }
-func nullString(value string) any {
+
+var errSetupComplete = errors.New("initial setup already complete")
+
+func nullableString(value string) *string {
 	if value == "" {
 		return nil
 	}
-	return value
+	return &value
+}
+func timePtr(value time.Time) *time.Time { return &value }
+
+func billRecordFromModel(model Bill) billRecord {
+	return billRecord{ID: model.ID, AccountID: model.AccountID, ChannelID: model.ChannelID, PlatformOrderNo: model.PlatformOrderNo, MerchantOrderNo: model.MerchantOrderNo, Subject: model.Subject, Description: model.Description, AmountMinor: model.AmountMinor, Currency: model.Currency, Provider: model.Provider, Scene: model.Scene, Status: model.Status, ProviderTransactionID: model.ProviderTransactionID, NotifyURL: model.NotifyURL, ReturnURL: stringValue(model.ReturnURL), Metadata: stringValue(model.Metadata), ExpiresAt: model.ExpiresAt, PaidAt: model.PaidAt, ClosedAt: model.ClosedAt, CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt}
+}
+func (record billRecord) toModel() *Bill {
+	return &Bill{ID: record.ID, AccountID: record.AccountID, ChannelID: record.ChannelID, PlatformOrderNo: record.PlatformOrderNo, MerchantOrderNo: record.MerchantOrderNo, Subject: record.Subject, Description: record.Description, AmountMinor: record.AmountMinor, Currency: record.Currency, Provider: record.Provider, Scene: record.Scene, Status: record.Status, NotifyURL: record.NotifyURL, ReturnURL: nullableString(record.ReturnURL), Metadata: nullableString(record.Metadata), ExpiresAt: record.ExpiresAt, PaidAt: record.PaidAt, ClosedAt: record.ClosedAt, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt}
+}
+func (record refundRecord) toModel() *Refund {
+	return &Refund{ID: record.ID, AccountID: record.AccountID, BillID: record.BillID, RefundOrderNo: record.RefundOrderNo, AmountMinor: record.AmountMinor, Reason: record.Reason, Status: record.Status, ProviderRefundID: record.ProviderRefundID, CreatedAt: record.CreatedAt}
+}
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 func _unused(_ context.Context, _ strconv.NumError) {}

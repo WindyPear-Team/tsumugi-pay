@@ -74,13 +74,13 @@ type webhookResult struct {
 }
 
 func (s *Service) loadChannel(ctx context.Context, token string) (channelRecord, error) {
-	var channel channelRecord
-	var ciphertext string
-	err := s.db.QueryRow(ctx, `SELECT id,account_id,provider,display_name,enabled,config_ciphertext,webhook_token FROM payment_channels WHERE webhook_token=$1`, token).Scan(&channel.ID, &channel.AccountID, &channel.Provider, &channel.DisplayName, &channel.Enabled, &ciphertext, &channel.WebhookToken)
+	var model PaymentChannel
+	err := s.db.DB().WithContext(ctx).Where("webhook_token = ?", token).Take(&model).Error
 	if err != nil {
-		return channel, err
+		return channelRecord{}, err
 	}
-	plain, err := s.decrypt(ciphertext)
+	channel := channelRecord{ID: model.ID, AccountID: model.AccountID, Provider: model.Provider, DisplayName: model.DisplayName, Enabled: model.Enabled, WebhookToken: model.WebhookToken}
+	plain, err := s.decrypt(model.ConfigCiphertext)
 	if err != nil {
 		return channel, err
 	}

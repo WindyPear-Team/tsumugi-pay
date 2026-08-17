@@ -31,22 +31,15 @@ func TestSQLiteSchemaAndBootstrap(t *testing.T) {
 	if err := service.Bootstrap(context.Background()); err != nil {
 		t.Fatalf("bootstrap sqlite: %v", err)
 	}
-	var users, channels int
-	if err := store.QueryRow(context.Background(), `SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
+	var users, channels int64
+	if err := store.DB().Model(&User{}).Count(&users).Error; err != nil {
 		t.Fatalf("count users: %v", err)
 	}
-	if err := store.QueryRow(context.Background(), `SELECT COUNT(*) FROM payment_channels`).Scan(&channels); err != nil {
+	if err := store.DB().Model(&PaymentChannel{}).Count(&channels).Error; err != nil {
 		t.Fatalf("count channels: %v", err)
 	}
 	if users != 2 || channels != 0 {
 		t.Fatalf("unexpected demo data: users=%d channels=%d", users, channels)
-	}
-}
-
-func TestNormalizeSQL(t *testing.T) {
-	query := normalizeSQL("mysql", `UPDATE bills SET updated_at=NOW() WHERE id=$1::uuid`)
-	if query != "UPDATE bills SET updated_at=CURRENT_TIMESTAMP WHERE id=?" {
-		t.Fatalf("unexpected normalized query: %s", query)
 	}
 }
 
@@ -57,10 +50,10 @@ func TestMigrateRenamesLegacyAccountColumns(t *testing.T) {
 	}
 	store := NewStore(database)
 	ctx := context.Background()
-	if _, err := store.Exec(ctx, `CREATE TABLE tenants (id TEXT PRIMARY KEY, name TEXT, merchant_no TEXT, status TEXT, api_secret_ciphertext TEXT, callback_secret_ciphertext TEXT)`); err != nil {
+	if err := store.DB().WithContext(ctx).Exec(`CREATE TABLE tenants (id TEXT PRIMARY KEY, name TEXT, merchant_no TEXT, status TEXT, api_secret_ciphertext TEXT, callback_secret_ciphertext TEXT)`).Error; err != nil {
 		t.Fatalf("create legacy accounts: %v", err)
 	}
-	if _, err := store.Exec(ctx, `CREATE TABLE bills (id TEXT PRIMARY KEY, tenant_id TEXT, status TEXT, created_at TIMESTAMP)`); err != nil {
+	if err := store.DB().WithContext(ctx).Exec(`CREATE TABLE bills (id TEXT PRIMARY KEY, tenant_id TEXT, status TEXT, created_at TIMESTAMP)`).Error; err != nil {
 		t.Fatalf("create legacy bills: %v", err)
 	}
 	if err := store.Migrate(ctx); err != nil {

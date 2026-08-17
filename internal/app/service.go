@@ -6,7 +6,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -20,8 +19,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 type Config struct {
@@ -80,8 +79,8 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	if !s.bootstrapDemo {
 		return nil
 	}
-	var existing int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(1) FROM users`).Scan(&existing); err != nil {
+	var existing int64
+	if err := s.db.DB().WithContext(ctx).Model(&User{}).Count(&existing).Error; err != nil {
 		return err
 	}
 	if existing > 0 {
@@ -99,22 +98,16 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
 	accountID := uuid.New()
-	if _, err := tx.Exec(ctx, `INSERT INTO accounts (id,name, merchant_no, api_secret_ciphertext, callback_secret_ciphertext) VALUES ($1,$2,$3,$4,$5)`, accountID, "演示租户", "100000", apiSecret, callbackSecret); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO users (id,email, password_hash, display_name, role) VALUES ($1,$2,$3,$4,'platform_admin')`, uuid.New(), "admin@tsumugi.local", string(passwordHash), "平台管理员"); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO users (id,account_id, email, password_hash, display_name, role) VALUES ($1,$2,$3,$4,$5,'user')`, uuid.New(), accountID, "merchant@tsumugi.local", string(passwordHash), "演示用户"); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return s.db.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&Account{ID: accountID, Name: "演示租户", MerchantNo: "100000", APISecretCiphertext: apiSecret, CallbackSecretCiphertext: callbackSecret}).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&User{ID: uuid.New(), Email: "admin@tsumugi.local", PasswordHash: string(passwordHash), DisplayName: "平台管理员", Role: "platform_admin", IsActive: true}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&User{ID: uuid.New(), AccountID: &accountID, Email: "merchant@tsumugi.local", PasswordHash: string(passwordHash), DisplayName: "演示用户", Role: "user", IsActive: true}).Error
+	})
 }
 
 func (s *Service) Routes() http.Handler {
@@ -282,10 +275,10 @@ func parseAmount(value string) (int64, error) {
 }
 func (s *Service) audit(ctx context.Context, accountID *uuid.UUID, actor *uuid.UUID, action, targetType, targetID, rid string, detail any) {
 	bytes, _ := json.Marshal(detail)
-	_, err := s.db.Exec(ctx, `INSERT INTO audit_logs (id,account_id,actor_user_id,action,target_type,target_id,request_id,detail) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, uuid.New(), accountID, actor, action, targetType, targetID, rid, bytes)
+	err := s.db.DB().WithContext(ctx).Create(&AuditLog{ID: uuid.New(), AccountID: accountID, ActorUserID: actor, Action: action, TargetType: targetType, TargetID: targetID, RequestID: rid, Detail: string(bytes)}).Error
 	if err != nil {
 		s.logger.Error("audit log failed", "error", err)
 	}
 }
-func isNoRows(err error) bool { return errors.Is(err, sql.ErrNoRows) || errors.Is(err, pgx.ErrNoRows) }
+func isNoRows(err error) bool { return errors.Is(err, gorm.ErrRecordNotFound) }
 func nowUTC() time.Time       { return time.Now().UTC() }

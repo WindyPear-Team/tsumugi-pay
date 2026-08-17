@@ -10,11 +10,12 @@ Tsumugi Pay 是一个面向 SaaS 场景的**多用户支付运营系统**。每�
 | --- | --- |
 | `cmd/`、`internal/` | 根目录 Go HTTP 服务、支付适配器与 OPS 兼容端点。 |
 | `web/` | 使用指定 shadcn 初始化命令生成的 React、Vite 管理后台；其 `dist/` 会被 Go `embed` 到二进制文件。 |
-| `migrations/001_init.sql` | PostgreSQL 原生迁移参考；服务启动时会自动应用跨库基础架构。 |
+| `internal/app/models.go` | GORM 数据模型与关联定义；服务启动时通过 `AutoMigrate` 自动同步跨库表结构和索引。 |
+| `migrations/001_init.sql` | 旧版 PostgreSQL 原生建表参考；新部署不需要手动执行。 |
 
 ## 本地启动
 
-服务支持 PostgreSQL、MySQL 8+ 与 SQLite。启动时会自动创建缺失的表和索引，因而不需要手动执行迁移；已有 PostgreSQL 部署仍可继续使用原迁移。以下示例使用开发配置；生产环境必须替换 JWT 密钥与 32 字节加密密钥。
+服务支持 PostgreSQL、MySQL 8+ 与 SQLite。启动时会使用 GORM `AutoMigrate` 创建缺失的表、索引和关联，并会兼容旧版 `tenants`/`tenant_id` 命名的数据库；新部署不需要手动执行 SQL 迁移。以下示例使用开发配置；生产环境必须替换 JWT 密钥与 32 字节加密密钥。
 
 ```powershell
 # 1. 设置服务配置（PostgreSQL）
