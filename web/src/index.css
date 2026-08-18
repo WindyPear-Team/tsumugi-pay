@@ -1120,6 +1120,16 @@ td b {
   border-radius: 10px;
   background: #f2faf6;
 }
+/* The authentication panel stays light in dark mode, so its credential values must not inherit the global light foreground. */
+:root[data-theme="dark"] .credential-box .detail {
+  border-color: #dcebe4;
+}
+:root[data-theme="dark"] .credential-box .detail span {
+  color: #58746a;
+}
+:root[data-theme="dark"] .credential-box .detail b {
+  color: #193c32;
+}
 .login-page {
   min-height: 100vh;
   display: grid;
