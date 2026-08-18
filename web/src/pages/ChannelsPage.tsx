@@ -223,6 +223,8 @@ function ChannelConfig({ channel, request, onClose, onSaved }: { channel: Channe
     const config = alipay
       ? {
           alipay: {
+            pid: values.pid || "",
+            mode: values.mode || "face_to_face",
             app_id: values.app_id || "",
             app_private_key_pem: values.app_private_key_pem || "",
             alipay_public_key_pem: values.alipay_public_key_pem || "",
@@ -286,9 +288,22 @@ function ChannelConfig({ channel, request, onClose, onSaved }: { channel: Channe
       </Label>
       {alipay ? (
         <>
+          <Label className="form-label">
+            支付方式
+            <Select value={values.mode || "face_to_face"} onValueChange={(value) => value && set("mode", value)}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="face_to_face">当面付（二维码）</SelectItem>
+                <SelectItem value="website">网站支付（网页收银台）</SelectItem>
+              </SelectContent>
+            </Select>
+          </Label>
+          {field("支付宝 PID", "pid")}
           {field("App ID", "app_id")}
-          {pem("应用私钥（PEM）", "app_private_key_pem", channel.config?.alipay?.app_private_key_configured)}
-          {pem("支付宝公钥（PEM）", "alipay_public_key_pem")}
+          {pem("应用私钥（PEM 或 Base64）", "app_private_key_pem", channel.config?.alipay?.app_private_key_configured)}
+          {pem("支付宝公钥（PEM 或 Base64）", "alipay_public_key_pem")}
           {field("网关地址（可选）", "gateway_url")}
           {field("同步跳转地址（可选）", "return_url")}
         </>

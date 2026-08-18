@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,8 @@ type providerConfig struct {
 }
 
 type alipayConfig struct {
+	PID                string `json:"pid"`
+	Mode               string `json:"mode"`
 	AppID              string `json:"app_id"`
 	AppPrivateKeyPEM   string `json:"app_private_key_pem"`
 	AlipayPublicKeyPEM string `json:"alipay_public_key_pem"`
@@ -158,8 +161,21 @@ func (s *Service) verifyWebhook(channel channelRecord, headers http.Header, body
 
 func (s *Service) alipayCreate(ctx context.Context, channel channelRecord, bill billRecord) (providerResult, error) {
 	cfg := channel.Config.Alipay
-	if cfg == nil || cfg.AppID == "" || cfg.AppPrivateKeyPEM == "" {
-		return providerResult{}, errors.New("支付宝通道未完成 app_id 或应用私钥配置")
+	if cfg == nil || cfg.PID == "" || cfg.AppID == "" || cfg.AppPrivateKeyPEM == "" {
+		return providerResult{}, errors.New("支付宝通道未完成 pid、app_id 或应用私钥配置")
+	}
+	switch alipayPaymentMode(cfg) {
+	case "face_to_face":
+		if bill.Scene != "native" {
+			return providerResult{}, errors.New("支付宝当面付只支持 native 二维码场景")
+		}
+		return s.alipayPrecreate(ctx, cfg, channel, bill)
+	case "website":
+		if bill.Scene != "page" && bill.Scene != "wap" {
+			return providerResult{}, errors.New("支付宝网站支付只支持 page 或 wap 场景")
+		}
+	default:
+		return providerResult{}, errors.New("支付宝支付方式必须为当面付或网站支付")
 	}
 	method := "alipay.trade.page.pay"
 	if bill.Scene == "wap" {
@@ -191,7 +207,35 @@ func (s *Service) alipayCreate(ctx context.Context, channel channelRecord, bill 
 	if gateway == "" {
 		gateway = "https://openapi.alipay.com/gateway.do"
 	}
-	return providerResult{PayURL: gateway + "?" + params.Encode(), Raw: map[string]any{"method": method, "gateway_url": gateway}}, nil
+	return providerResult{PayURL: appendQuery(gateway, params), Raw: map[string]any{"method": method, "gateway_url": gateway}}, nil
+}
+
+func (s *Service) alipayPrecreate(ctx context.Context, cfg *alipayConfig, channel channelRecord, bill billRecord) (providerResult, error) {
+	biz := map[string]any{
+		"out_trade_no": bill.MerchantOrderNo,
+		"total_amount": moneyString(bill.AmountMinor),
+		"subject":      bill.Subject,
+	}
+	if bill.Description != "" {
+		biz["body"] = bill.Description
+	}
+	if bill.ExpiresAt != nil {
+		biz["timeout_express"] = strconv.Itoa(int(time.Until(*bill.ExpiresAt).Minutes())) + "m"
+	}
+	payload, err := json.Marshal(biz)
+	if err != nil {
+		return providerResult{}, err
+	}
+	notifyURL := fmt.Sprintf("%s/api/v1/webhooks/alipay/%s", s.baseURL, channel.WebhookToken)
+	response, err := s.alipayCall(ctx, cfg, "alipay.trade.precreate", string(payload), notifyURL)
+	if err != nil {
+		return providerResult{}, err
+	}
+	qrCode, _ := response["qr_code"].(string)
+	if qrCode == "" {
+		return providerResult{}, errors.New("支付宝预创建订单未返回二维码地址")
+	}
+	return providerResult{ProviderTransactionID: jsonString(response, "trade_no"), QRCode: qrCode, PayURL: "alipayqr://platformapi/startapp?saId=10000007&qrcode=" + qrCode, Raw: response}, nil
 }
 
 func (s *Service) alipayRefund(ctx context.Context, channel channelRecord, bill billRecord, refund refundRecord) (string, map[string]any, error) {
@@ -200,7 +244,7 @@ func (s *Service) alipayRefund(ctx context.Context, channel channelRecord, bill 
 		return "", nil, errors.New("支付宝通道未配置")
 	}
 	biz, _ := json.Marshal(map[string]any{"out_trade_no": bill.MerchantOrderNo, "refund_amount": moneyString(refund.AmountMinor), "out_request_no": refund.RefundOrderNo, "refund_reason": refund.Reason})
-	payload, err := s.alipayCall(ctx, cfg, "alipay.trade.refund", string(biz))
+	payload, err := s.alipayCall(ctx, cfg, "alipay.trade.refund", string(biz), "")
 	if err != nil {
 		return "", nil, err
 	}
@@ -212,7 +256,7 @@ func (s *Service) alipayClose(ctx context.Context, channel channelRecord, bill b
 		return errors.New("支付宝通道未配置")
 	}
 	biz, _ := json.Marshal(map[string]any{"out_trade_no": bill.MerchantOrderNo})
-	_, err := s.alipayCall(ctx, cfg, "alipay.trade.close", string(biz))
+	_, err := s.alipayCall(ctx, cfg, "alipay.trade.close", string(biz), "")
 	return err
 }
 func (s *Service) alipayQuery(ctx context.Context, channel channelRecord, bill billRecord) (providerPaymentStatus, error) {
@@ -221,7 +265,7 @@ func (s *Service) alipayQuery(ctx context.Context, channel channelRecord, bill b
 		return providerPaymentStatus{}, errors.New("支付宝通道未配置")
 	}
 	biz, _ := json.Marshal(map[string]string{"out_trade_no": bill.MerchantOrderNo})
-	response, err := s.alipayCall(ctx, cfg, "alipay.trade.query", string(biz))
+	response, err := s.alipayCall(ctx, cfg, "alipay.trade.query", string(biz), "")
 	if err != nil {
 		return providerPaymentStatus{}, err
 	}
@@ -229,8 +273,11 @@ func (s *Service) alipayQuery(ctx context.Context, channel channelRecord, bill b
 	tradeStatus, _ := response["trade_status"].(string)
 	return providerPaymentStatus{Paid: tradeStatus == "TRADE_SUCCESS" || tradeStatus == "TRADE_FINISHED", TransactionID: tradeID, Raw: response}, nil
 }
-func (s *Service) alipayCall(ctx context.Context, cfg *alipayConfig, method, biz string) (map[string]any, error) {
+func (s *Service) alipayCall(ctx context.Context, cfg *alipayConfig, method, biz, notifyURL string) (map[string]any, error) {
 	params := url.Values{"app_id": {cfg.AppID}, "method": {method}, "format": {"JSON"}, "charset": {"utf-8"}, "sign_type": {"RSA2"}, "timestamp": {time.Now().Format("2006-01-02 15:04:05")}, "version": {"1.0"}, "biz_content": {biz}}
+	if notifyURL != "" {
+		params.Set("notify_url", notifyURL)
+	}
 	sign, err := rsaSign(cfg.AppPrivateKeyPEM, canonicalValues(params))
 	if err != nil {
 		return nil, err
@@ -272,6 +319,21 @@ func (s *Service) alipayCall(ctx context.Context, cfg *alipayConfig, method, biz
 		}
 	}
 	return nil, errors.New("支付宝响应格式错误")
+}
+
+func alipayPaymentMode(cfg *alipayConfig) string {
+	if cfg == nil || cfg.Mode == "" {
+		return "face_to_face"
+	}
+	return cfg.Mode
+}
+
+func appendQuery(base string, values url.Values) string {
+	separator := "?"
+	if strings.Contains(base, "?") {
+		separator = "&"
+	}
+	return base + separator + values.Encode()
 }
 func (s *Service) verifyAlipayWebhook(channel channelRecord, form url.Values) (webhookResult, error) {
 	cfg := channel.Config.Alipay
@@ -556,14 +618,14 @@ func rsaVerifyBytes(pemText string, message []byte, signature string) error {
 	return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signed)
 }
 func parsePrivateKey(pemText string) (*rsa.PrivateKey, error) {
-	block, _ := pem.Decode([]byte(pemText))
-	if block == nil {
-		return nil, errors.New("invalid RSA private key PEM")
+	der, err := decodeRSAKey(pemText, "private")
+	if err != nil {
+		return nil, err
 	}
-	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
 		return key, nil
 	}
-	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	keyAny, err := x509.ParsePKCS8PrivateKey(der)
 	if err != nil {
 		return nil, err
 	}
@@ -574,14 +636,14 @@ func parsePrivateKey(pemText string) (*rsa.PrivateKey, error) {
 	return key, nil
 }
 func parsePublicKey(pemText string) (*rsa.PublicKey, error) {
-	block, _ := pem.Decode([]byte(pemText))
-	if block == nil {
-		return nil, errors.New("invalid RSA public key PEM")
+	der, err := decodeRSAKey(pemText, "public")
+	if err != nil {
+		return nil, err
 	}
-	if key, err := x509.ParsePKCS1PublicKey(block.Bytes); err == nil {
+	if key, err := x509.ParsePKCS1PublicKey(der); err == nil {
 		return key, nil
 	}
-	keyAny, err := x509.ParsePKIXPublicKey(block.Bytes)
+	keyAny, err := x509.ParsePKIXPublicKey(der)
 	if err != nil {
 		return nil, err
 	}
@@ -590,6 +652,20 @@ func parsePublicKey(pemText string) (*rsa.PublicKey, error) {
 		return nil, errors.New("PEM does not contain an RSA public key")
 	}
 	return key, nil
+}
+
+func decodeRSAKey(value, kind string) ([]byte, error) {
+	if block, _ := pem.Decode([]byte(strings.TrimSpace(value))); block != nil {
+		return block.Bytes, nil
+	}
+	// Alipay's key-management page commonly displays a bare Base64 key instead
+	// of a PEM block. Whitespace is ignored so copied line-wrapped keys work too.
+	compact := strings.NewReplacer(" ", "", "\n", "", "\r", "", "\t", "").Replace(value)
+	der, err := base64.StdEncoding.DecodeString(compact)
+	if err != nil || len(der) == 0 {
+		return nil, fmt.Errorf("invalid RSA %s key; paste a PEM block or Base64 key", kind)
+	}
+	return der, nil
 }
 func wechatDecrypt(apiKey, nonce, associated, cipherText string) ([]byte, error) {
 	if len(apiKey) != 32 {

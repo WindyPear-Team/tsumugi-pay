@@ -122,7 +122,7 @@ yarn dev
   "notify_url": "https://merchant.example.com/pay/notify",
   "return_url": "https://merchant.example.com/pay/return",
   "metadata": "customer=42",
-  "scene": "page",
+  "scene": "native",
   "sign_type": "HMAC-SHA256",
   "sign": "<canonical payload signature>"
 }
@@ -134,11 +134,13 @@ yarn dev
 
 ### 支付宝
 
-支付宝适配器会创建 `alipay.trade.page.pay`（`page`）或 `alipay.trade.wap.pay`（`wap`）请求，采用 RSA2 签名；退款使用 `alipay.trade.refund`，关闭交易使用 `alipay.trade.close`。支付宝通知会使用支付宝公钥验签，且只在验签、订单号、金额与状态校验后推进本地账单状态。[3]
+支付宝通道可选择当面付或网站支付：当面付使用 `alipay.trade.precreate`（`native`）并返回二维码及支付宝 App 跳转地址；网站支付使用 `alipay.trade.page.pay`（`page`）或 `alipay.trade.wap.pay`（`wap`）。未传入 `scene` 时，会根据通道方式自动选择 `native` 或 `page`。所有请求采用 RSA2 签名；退款使用 `alipay.trade.refund`，关闭交易使用 `alipay.trade.close`。支付宝通知会使用支付宝公钥验签，且只在验签、订单号、金额与状态校验后推进本地账单状态。[3]
 
 ```json
 {
   "alipay": {
+    "pid": "支付宝收款账号 PID",
+    "mode": "face_to_face",
     "app_id": "支付宝应用 AppID",
     "app_private_key_pem": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
     "alipay_public_key_pem": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----",

@@ -14,6 +14,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -92,6 +93,101 @@ func TestFetchWechatPlatformCertificate(t *testing.T) {
 	}
 	if publicKey.N.Cmp(platformKey.PublicKey.N) != 0 || publicKey.E != platformKey.PublicKey.E {
 		t.Fatal("fetched public key does not match platform certificate")
+	}
+}
+
+func TestParseRSAKeysAcceptBareBase64(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	private, err := parsePrivateKey(base64.StdEncoding.EncodeToString(x509.MarshalPKCS1PrivateKey(privateKey)))
+	if err != nil {
+		t.Fatalf("parse bare Base64 private key: %v", err)
+	}
+	if private.PublicKey.N.Cmp(privateKey.PublicKey.N) != 0 || private.PublicKey.E != privateKey.PublicKey.E {
+		t.Fatal("parsed private key does not match source key")
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	public, err := parsePublicKey(base64.StdEncoding.EncodeToString(publicDER))
+	if err != nil {
+		t.Fatalf("parse bare Base64 public key: %v", err)
+	}
+	if public.N.Cmp(privateKey.PublicKey.N) != 0 || public.E != privateKey.PublicKey.E {
+		t.Fatal("parsed public key does not match source key")
+	}
+}
+
+func TestAlipayNativeCreatesQRCode(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse Alipay request: %v", err)
+		}
+		if r.Method != http.MethodPost || r.PostForm.Get("method") != "alipay.trade.precreate" {
+			t.Fatalf("expected native precreate request, got %s %q", r.Method, r.PostForm.Get("method"))
+		}
+		var business map[string]any
+		if err := json.Unmarshal([]byte(r.PostForm.Get("biz_content")), &business); err != nil {
+			t.Fatalf("decode business content: %v", err)
+		}
+		if _, exists := business["seller_id"]; exists {
+			t.Fatalf("face-to-face request must not send seller_id: %v", business)
+		}
+		if r.PostForm.Get("notify_url") != "https://pay.example.test/api/v1/webhooks/alipay/channel-token" {
+			t.Fatalf("notify URL = %q", r.PostForm.Get("notify_url"))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"alipay_trade_precreate_response": map[string]string{"code": "10000", "qr_code": "https://qr.alipay.example.test/ORDER-001"}})
+	}))
+	defer server.Close()
+	service := &Service{httpClient: server.Client(), baseURL: "https://pay.example.test"}
+	channel := channelRecord{Provider: "alipay", Enabled: true, WebhookToken: "channel-token", Config: providerConfig{Alipay: &alipayConfig{PID: "2088732206651800", Mode: "face_to_face", AppID: "app-id", AppPrivateKeyPEM: string(privatePEM), GatewayURL: server.URL}}}
+	bill := billRecord{MerchantOrderNo: "ORDER-001", Subject: "Native test", AmountMinor: 100, Scene: "native"}
+	result, err := service.alipayCreate(context.Background(), channel, bill)
+	if err != nil {
+		t.Fatalf("create native Alipay payment: %v", err)
+	}
+	if result.QRCode != "https://qr.alipay.example.test/ORDER-001" {
+		t.Fatalf("QR code = %q", result.QRCode)
+	}
+	if result.PayURL != "alipayqr://platformapi/startapp?saId=10000007&qrcode=https://qr.alipay.example.test/ORDER-001" {
+		t.Fatalf("Alipay app URL = %q", result.PayURL)
+	}
+}
+
+func TestAlipayWebsiteCreatesCheckoutURL(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	service := &Service{}
+	channel := channelRecord{Provider: "alipay", Enabled: true, Config: providerConfig{Alipay: &alipayConfig{PID: "2088732206651800", Mode: "website", AppID: "app-id", AppPrivateKeyPEM: string(privatePEM), GatewayURL: "https://gateway.example.test/gateway.do?charset=utf-8"}}}
+	bill := billRecord{MerchantOrderNo: "ORDER-002", Subject: "Website test", AmountMinor: 100, Scene: "page"}
+	result, err := service.alipayCreate(context.Background(), channel, bill)
+	if err != nil {
+		t.Fatalf("create website Alipay payment: %v", err)
+	}
+	checkout, err := url.Parse(result.PayURL)
+	if err != nil {
+		t.Fatalf("parse checkout URL: %v", err)
+	}
+	if checkout.Query().Get("method") != "alipay.trade.page.pay" || checkout.Query().Get("sign") == "" {
+		t.Fatalf("unexpected website checkout URL: %s", result.PayURL)
+	}
+	var business map[string]any
+	if err := json.Unmarshal([]byte(checkout.Query().Get("biz_content")), &business); err != nil {
+		t.Fatalf("decode website business content: %v", err)
+	}
+	if _, exists := business["seller_id"]; exists {
+		t.Fatalf("website request must not send seller_id: %v", business)
 	}
 }
 

@@ -20,6 +20,7 @@ type Checkout = {
 export function CheckoutPage({ orderNo, siteName }: { orderNo: string; siteName: string }) {
   const [checkout, setCheckout] = useState<Checkout | null>(null)
   const [error, setError] = useState("")
+  const autoRedirect = new URLSearchParams(window.location.search).get("auto_redirect") !== "0"
 
   useEffect(() => {
     let cancelled = false
@@ -31,9 +32,10 @@ export function CheckoutPage({ orderNo, siteName }: { orderNo: string; siteName:
         if (!response.ok) throw new Error(body.message || "无法获取支付订单")
         if (cancelled) return
         setCheckout(body)
-        if (body.status === "pending" && body.pay_url && !redirecting) {
+        const paymentTarget = body.pay_url || (autoRedirect ? body.qrcode : "")
+        if (body.status === "pending" && autoRedirect && paymentTarget && !redirecting) {
           redirecting = true
-          window.location.replace(body.pay_url)
+          window.location.replace(paymentTarget)
         }
         if (body.status === "paid" && body.return_url && !redirecting) {
           redirecting = true
@@ -49,7 +51,7 @@ export function CheckoutPage({ orderNo, siteName }: { orderNo: string; siteName:
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [orderNo])
+  }, [autoRedirect, orderNo])
 
   return (
     <main className="checkout-page">
@@ -69,7 +71,7 @@ export function CheckoutPage({ orderNo, siteName }: { orderNo: string; siteName:
             {checkout.status === "pending" && checkout.qrcode && (
               <div className="checkout-qr">
                 <QRCodeSVG value={checkout.qrcode} size={220} level="M" includeMargin />
-                <p>请使用微信扫描二维码完成支付</p>
+                <p>{autoRedirect ? "正在打开支付地址..." : "请使用微信扫描二维码完成支付"}</p>
               </div>
             )}
             {checkout.status === "pending" && !checkout.qrcode && !checkout.pay_url && <div className="checkout-message">支付方式暂未返回可用收银台。</div>}

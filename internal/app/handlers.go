@@ -260,7 +260,7 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 	}
 	scene := input.Scene
 	if scene == "" {
-		if input.PaymentMethod == "alipay" {
+		if input.PaymentMethod == "alipay" && alipayPaymentMode(channel.Config.Alipay) == "website" {
 			scene = "page"
 		} else {
 			scene = "native"
@@ -1663,7 +1663,7 @@ func (s *Service) publicChannelConfig(ciphertext string) map[string]any {
 	}
 	if config.Alipay != nil {
 		return map[string]any{"alipay": map[string]any{
-			"app_id": config.Alipay.AppID, "alipay_public_key_pem": config.Alipay.AlipayPublicKeyPEM,
+			"pid": config.Alipay.PID, "mode": alipayPaymentMode(config.Alipay), "app_id": config.Alipay.AppID, "alipay_public_key_pem": config.Alipay.AlipayPublicKeyPEM,
 			"gateway_url": config.Alipay.GatewayURL, "return_url": config.Alipay.ReturnURL,
 			"app_private_key_configured": config.Alipay.AppPrivateKeyPEM != "",
 		}}
@@ -1842,6 +1842,8 @@ func mergeProviderConfig(provider string, stored, input providerConfig) provider
 		if stored.Alipay == nil {
 			stored.Alipay = &alipayConfig{}
 		}
+		mergeString(&stored.Alipay.PID, input.Alipay.PID)
+		mergeString(&stored.Alipay.Mode, input.Alipay.Mode)
 		mergeString(&stored.Alipay.AppID, input.Alipay.AppID)
 		mergeString(&stored.Alipay.AppPrivateKeyPEM, input.Alipay.AppPrivateKeyPEM)
 		mergeString(&stored.Alipay.AlipayPublicKeyPEM, input.Alipay.AlipayPublicKeyPEM)
@@ -2526,8 +2528,11 @@ func providerOPSCode(provider string) string {
 }
 func validateProviderConfig(provider string, config providerConfig) error {
 	if provider == "alipay" {
-		if config.Alipay == nil || config.Alipay.AppID == "" || config.Alipay.AppPrivateKeyPEM == "" || config.Alipay.AlipayPublicKeyPEM == "" {
-			return errors.New("支付宝配置需要 app_id、app_private_key_pem、alipay_public_key_pem")
+		if config.Alipay == nil || config.Alipay.PID == "" || config.Alipay.AppID == "" || config.Alipay.AppPrivateKeyPEM == "" || config.Alipay.AlipayPublicKeyPEM == "" {
+			return errors.New("支付宝配置需要 pid、app_id、app_private_key_pem、alipay_public_key_pem")
+		}
+		if mode := alipayPaymentMode(config.Alipay); mode != "face_to_face" && mode != "website" {
+			return errors.New("支付宝支付方式必须为 face_to_face 或 website")
 		}
 		return nil
 	}
