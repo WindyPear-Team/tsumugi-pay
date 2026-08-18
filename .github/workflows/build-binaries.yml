@@ -1,0 +1,112 @@
+name: Build binaries
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Build frontend
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+          cache-dependency-path: web/yarn.lock
+
+      - name: Install Yarn
+        run: |
+          corepack enable
+          corepack prepare yarn@4.14.1 --activate
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: yarn install --immutable
+
+      - name: Build frontend
+        working-directory: web
+        run: yarn build
+
+      - name: Upload embedded frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  binary:
+    name: Build ${{ matrix.name }}
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-x64
+            runner: macos-13
+            arch: amd64
+            ext: ""
+          - name: macos-arm64
+            runner: macos-14
+            arch: arm64
+            ext: ""
+          - name: linux-x64
+            runner: ubuntu-24.04
+            arch: amd64
+            ext: ""
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+            ext: ""
+          - name: windows-x64
+            runner: windows-2025
+            arch: amd64
+            ext: .exe
+          - name: windows-arm64
+            runner: windows-11-arm
+            arch: arm64
+            ext: .exe
+    runs-on: ${{ matrix.runner }}
+    env:
+      CGO_ENABLED: 1
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Verify runner architecture
+        shell: bash
+        run: test "$(go env GOARCH)" = "${{ matrix.arch }}"
+
+      - name: Build backend
+        shell: bash
+        run: |
+          mkdir -p dist
+          go build -trimpath -buildvcs=false -ldflags="-s -w" \
+            -o "dist/tsumugi-pay-${{ matrix.name }}${{ matrix.ext }}" ./cmd/server
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsumugi-pay-${{ matrix.name }}
+          path: dist/tsumugi-pay-${{ matrix.name }}${{ matrix.ext }}
+          if-no-files-found: error
+          retention-days: 14

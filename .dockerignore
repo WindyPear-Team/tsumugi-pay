@@ -1,0 +1,13 @@
+.git
+.github
+.env
+.env.*
+web/.env
+web/.env.*
+server.exe
+web/node_modules
+web/.yarn/install-state.gz
+web/dist
+*.db
+*.sqlite
+*.sqlite3
