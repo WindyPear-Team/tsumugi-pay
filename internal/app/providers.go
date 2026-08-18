@@ -170,6 +170,11 @@ func (s *Service) alipayCreate(ctx context.Context, channel channelRecord, bill 
 			return providerResult{}, errors.New("支付宝当面付只支持 native 二维码场景")
 		}
 		return s.alipayPrecreate(ctx, cfg, channel, bill)
+	case "bill_query":
+		if bill.Scene != "native" {
+			return providerResult{}, errors.New("支付宝账单查询支付只支持 native 二维码场景")
+		}
+		return s.alipayBillQueryCreate(cfg, bill)
 	case "website":
 		if bill.Scene != "page" && bill.Scene != "wap" {
 			return providerResult{}, errors.New("支付宝网站支付只支持 page 或 wap 场景")
@@ -264,6 +269,9 @@ func (s *Service) alipayQuery(ctx context.Context, channel channelRecord, bill b
 	if cfg == nil {
 		return providerPaymentStatus{}, errors.New("支付宝通道未配置")
 	}
+	if alipayPaymentMode(cfg) == "bill_query" {
+		return s.alipayAccountLogQuery(ctx, cfg, bill)
+	}
 	biz, _ := json.Marshal(map[string]string{"out_trade_no": bill.MerchantOrderNo})
 	response, err := s.alipayCall(ctx, cfg, "alipay.trade.query", string(biz), "")
 	if err != nil {
@@ -272,6 +280,130 @@ func (s *Service) alipayQuery(ctx context.Context, channel channelRecord, bill b
 	tradeID, _ := response["trade_no"].(string)
 	tradeStatus, _ := response["trade_status"].(string)
 	return providerPaymentStatus{Paid: tradeStatus == "TRADE_SUCCESS" || tradeStatus == "TRADE_FINISHED", TransactionID: tradeID, Raw: response}, nil
+}
+
+func (s *Service) alipayBillQueryCreate(cfg *alipayConfig, bill billRecord) (providerResult, error) {
+	if cfg.PID == "" {
+		return providerResult{}, errors.New("支付宝账单查询支付需要配置 pid")
+	}
+	biz, err := json.Marshal(map[string]string{
+		"s": "money",
+		"u": cfg.PID,
+		"a": moneyString(bill.AmountMinor),
+		"m": bill.MerchantOrderNo,
+	})
+	if err != nil {
+		return providerResult{}, err
+	}
+	inner := "alipays://platformapi/startapp?appId=20000123&actionType=scan&biz_data=" + url.QueryEscape(string(biz))
+	paymentURL := "alipayqr://platformapi/startapp?saId=20000032&url=" + url.QueryEscape(inner)
+	baseURL := strings.TrimRight(s.baseURL, "/")
+	if baseURL == "" || bill.PlatformOrderNo == "" {
+		return providerResult{}, errors.New("支付宝账单查询支付需要平台订单地址")
+	}
+	landingURL := baseURL + "/api/v1/payments/" + url.PathEscape(bill.PlatformOrderNo) + "/alipay"
+	return providerResult{QRCode: landingURL, PayURL: paymentURL, Raw: map[string]any{"method": "alipay.data.bill.accountlog.query", "reconciliation": "merchant_order_no"}}, nil
+}
+
+func (s *Service) alipayAccountLogQuery(ctx context.Context, cfg *alipayConfig, bill billRecord) (providerPaymentStatus, error) {
+	if cfg.AlipayPublicKeyPEM == "" {
+		return providerPaymentStatus{}, errors.New("支付宝账单查询需要配置支付宝公钥")
+	}
+	biz, err := json.Marshal(map[string]string{"merchant_order_no": bill.MerchantOrderNo, "page_no": "1", "page_size": "20"})
+	if err != nil {
+		return providerPaymentStatus{}, err
+	}
+	params := url.Values{"app_id": {cfg.AppID}, "method": {"alipay.data.bill.accountlog.query"}, "format": {"JSON"}, "charset": {"utf-8"}, "sign_type": {"RSA2"}, "timestamp": {time.Now().Format("2006-01-02 15:04:05")}, "version": {"1.0"}, "biz_content": {string(biz)}}
+	sign, err := rsaSign(cfg.AppPrivateKeyPEM, canonicalValues(params))
+	if err != nil {
+		return providerPaymentStatus{}, err
+	}
+	params.Set("sign", sign)
+	gateway := cfg.GatewayURL
+	if gateway == "" {
+		gateway = "https://openapi.alipay.com/gateway.do"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gateway, strings.NewReader(params.Encode()))
+	if err != nil {
+		return providerPaymentStatus{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+	client := s.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return providerPaymentStatus{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return providerPaymentStatus{}, err
+	}
+	if resp.StatusCode/100 != 2 {
+		return providerPaymentStatus{}, fmt.Errorf("支付宝账单查询接口响应 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(body, &outer); err != nil {
+		return providerPaymentStatus{}, fmt.Errorf("解析支付宝账单查询响应: %w", err)
+	}
+	responseJSON, ok := outer["alipay_data_bill_accountlog_query_response"]
+	if !ok {
+		return providerPaymentStatus{}, errors.New("支付宝账单查询响应缺少业务数据")
+	}
+	var responseSignature string
+	if err := json.Unmarshal(outer["sign"], &responseSignature); err != nil || responseSignature == "" {
+		return providerPaymentStatus{}, errors.New("支付宝账单查询响应缺少签名")
+	}
+	if err := rsaVerifyBytes(cfg.AlipayPublicKeyPEM, responseJSON, responseSignature); err != nil {
+		return providerPaymentStatus{}, fmt.Errorf("支付宝账单查询响应验签失败: %w", err)
+	}
+	var response struct {
+		Code       string           `json:"code"`
+		SubMsg     string           `json:"sub_msg"`
+		DetailList []map[string]any `json:"detail_list"`
+	}
+	if err := json.Unmarshal(responseJSON, &response); err != nil {
+		return providerPaymentStatus{}, fmt.Errorf("解析支付宝账单明细: %w", err)
+	}
+	if response.Code != "10000" {
+		return providerPaymentStatus{}, fmt.Errorf("支付宝账单查询接口错误: %s", response.SubMsg)
+	}
+	for _, detail := range response.DetailList {
+		merchantOrderNo := jsonString(detail, "merchant_order_no")
+		if merchantOrderNo != bill.MerchantOrderNo || !alipayIncoming(detail) || !alipayAmountMatches(detail, bill.AmountMinor) {
+			continue
+		}
+		tradeID := jsonString(detail, "alipay_order_no")
+		if tradeID == "" {
+			tradeID = jsonString(detail, "account_log_id")
+		}
+		if tradeID == "" {
+			continue
+		}
+		return providerPaymentStatus{Paid: true, TransactionID: tradeID, Raw: map[string]any{"verified": true, "method": "alipay.data.bill.accountlog.query", "detail": detail}}, nil
+	}
+	return providerPaymentStatus{Raw: map[string]any{"verified": true, "method": "alipay.data.bill.accountlog.query", "detail_count": len(response.DetailList)}}, nil
+}
+
+func alipayIncoming(detail map[string]any) bool {
+	switch strings.ToUpper(strings.TrimSpace(jsonString(detail, "direction"))) {
+	case "IN", "INCOME", "CREDIT", "收入":
+		return true
+	default:
+		return false
+	}
+}
+
+func alipayAmountMatches(detail map[string]any, amountMinor int64) bool {
+	for _, key := range []string{"trans_amount", "amount"} {
+		if value := jsonString(detail, key); value != "" {
+			parsed, err := parseAmount(value)
+			return err == nil && parsed == amountMinor
+		}
+	}
+	return false
 }
 func (s *Service) alipayCall(ctx context.Context, cfg *alipayConfig, method, biz, notifyURL string) (map[string]any, error) {
 	params := url.Values{"app_id": {cfg.AppID}, "method": {method}, "format": {"JSON"}, "charset": {"utf-8"}, "sign_type": {"RSA2"}, "timestamp": {time.Now().Format("2006-01-02 15:04:05")}, "version": {"1.0"}, "biz_content": {biz}}

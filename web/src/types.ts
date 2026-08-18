@@ -30,7 +30,7 @@ export type Channel = {
   config?: {
     alipay?: {
       pid?: string
-      mode?: "face_to_face" | "website"
+      mode?: "face_to_face" | "website" | "bill_query"
       app_id?: string
       alipay_public_key_pem?: string
       gateway_url?: string

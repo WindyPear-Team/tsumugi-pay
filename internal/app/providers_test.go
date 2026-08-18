@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -188,6 +189,73 @@ func TestAlipayWebsiteCreatesCheckoutURL(t *testing.T) {
 	}
 	if _, exists := business["seller_id"]; exists {
 		t.Fatalf("website request must not send seller_id: %v", business)
+	}
+}
+
+func TestAlipayBillQueryCreatesPaymentURLAndReconcilesVerifiedLog(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	publicDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
+	responseJSON := `{"code":"10000","detail_list":[{"account_log_id":"LOG-001","alipay_order_no":"TRADE-001","merchant_order_no":"ORDER-003","trans_amount":"1.00","direction":"IN"}]}`
+	responseSign, err := rsaSign(string(privatePEM), responseJSON)
+	if err != nil {
+		t.Fatalf("sign account-log response: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse Alipay request: %v", err)
+		}
+		if r.PostForm.Get("method") != "alipay.data.bill.accountlog.query" {
+			t.Fatalf("account-log method = %q", r.PostForm.Get("method"))
+		}
+		var business map[string]string
+		if err := json.Unmarshal([]byte(r.PostForm.Get("biz_content")), &business); err != nil {
+			t.Fatalf("decode account-log query: %v", err)
+		}
+		if business["merchant_order_no"] != "ORDER-003" {
+			t.Fatalf("merchant order = %q", business["merchant_order_no"])
+		}
+		_, _ = fmt.Fprintf(w, `{"alipay_data_bill_accountlog_query_response":%s,"sign":%q}`, responseJSON, responseSign)
+	}))
+	defer server.Close()
+	service := &Service{httpClient: server.Client(), baseURL: "http://pay.example.test"}
+	config := &alipayConfig{PID: "2088732206651800", Mode: "bill_query", AppID: "app-id", AppPrivateKeyPEM: string(privatePEM), AlipayPublicKeyPEM: string(publicPEM), GatewayURL: server.URL}
+	bill := billRecord{PlatformOrderNo: "TP-003", MerchantOrderNo: "ORDER-003", Subject: "Bill query test", AmountMinor: 100, Scene: "native"}
+	created, err := service.alipayBillQueryCreate(config, bill)
+	if err != nil {
+		t.Fatalf("create bill-query payment URL: %v", err)
+	}
+	if created.QRCode != "http://pay.example.test/api/v1/payments/TP-003/alipay" {
+		t.Fatalf("intermediate QR URL = %q", created.QRCode)
+	}
+	outer, err := url.Parse(created.PayURL)
+	if err != nil {
+		t.Fatalf("parse bill-query payment URL: %v", err)
+	}
+	inner, err := url.Parse(outer.Query().Get("url"))
+	if err != nil {
+		t.Fatalf("parse Alipay app URL: %v", err)
+	}
+	var paymentData map[string]string
+	if err := json.Unmarshal([]byte(inner.Query().Get("biz_data")), &paymentData); err != nil {
+		t.Fatalf("decode bill-query payment data: %v", err)
+	}
+	if paymentData["u"] != config.PID || paymentData["a"] != "1.00" || paymentData["m"] != bill.MerchantOrderNo {
+		t.Fatalf("unexpected bill-query payment data: %+v", paymentData)
+	}
+	status, err := service.alipayAccountLogQuery(context.Background(), config, bill)
+	if err != nil {
+		t.Fatalf("query verified account log: %v", err)
+	}
+	if !status.Paid || status.TransactionID != "TRADE-001" {
+		t.Fatalf("account-log status = %+v", status)
 	}
 }
 

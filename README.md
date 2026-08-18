@@ -134,7 +134,7 @@ yarn dev
 
 ### 支付宝
 
-支付宝通道可选择当面付或网站支付：当面付使用 `alipay.trade.precreate`（`native`）并返回二维码及支付宝 App 跳转地址；网站支付使用 `alipay.trade.page.pay`（`page`）或 `alipay.trade.wap.pay`（`wap`）。未传入 `scene` 时，会根据通道方式自动选择 `native` 或 `page`。所有请求采用 RSA2 签名；退款使用 `alipay.trade.refund`，关闭交易使用 `alipay.trade.close`。支付宝通知会使用支付宝公钥验签，且只在验签、订单号、金额与状态校验后推进本地账单状态。[3]
+支付宝通道可选择当面付、网站支付或账单查询：当面付使用 `alipay.trade.precreate`（`native`）并返回二维码及支付宝 App 跳转地址；网站支付使用 `alipay.trade.page.pay`（`page`）或 `alipay.trade.wap.pay`（`wap`）；账单查询生成 PID 付款二维码，并使用 `alipay.data.bill.accountlog.query` 按商户订单号轮询已授权账户的账务流水。账单查询响应必须使用支付宝公钥验签，且仅在订单号、收入方向、金额及外部流水号均匹配时推进账单状态。未传入 `scene` 时，会根据通道方式自动选择 `native` 或 `page`。所有请求采用 RSA2 签名；退款使用 `alipay.trade.refund`，关闭交易使用 `alipay.trade.close`。支付宝通知会使用支付宝公钥验签，且只在验签、订单号、金额与状态校验后推进本地账单状态。[3]
 
 ```json
 {

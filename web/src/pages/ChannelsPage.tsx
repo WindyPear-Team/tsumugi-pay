@@ -297,6 +297,7 @@ function ChannelConfig({ channel, request, onClose, onSaved }: { channel: Channe
               <SelectContent>
                 <SelectItem value="face_to_face">当面付（二维码）</SelectItem>
                 <SelectItem value="website">网站支付（网页收银台）</SelectItem>
+                <SelectItem value="bill_query">账单查询（二维码）</SelectItem>
               </SelectContent>
             </Select>
           </Label>

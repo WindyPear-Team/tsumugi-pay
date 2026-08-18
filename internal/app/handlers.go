@@ -172,6 +172,33 @@ func (s *Service) publicCheckout(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Service) alipayBillQueryLanding(w http.ResponseWriter, r *http.Request) {
+	orderNo := strings.TrimSpace(r.PathValue("orderNo"))
+	if orderNo == "" || len(orderNo) > 64 {
+		http.NotFound(w, r)
+		return
+	}
+	var bill Bill
+	if err := s.db.DB().WithContext(r.Context()).Take(&bill, "platform_order_no = ?", orderNo).Error; err != nil || bill.Provider != "alipay" {
+		http.NotFound(w, r)
+		return
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(bill.ProviderPayload), &payload) != nil || payload["method"] != "alipay.data.bill.accountlog.query" {
+		http.NotFound(w, r)
+		return
+	}
+	paymentURL, _ := payload["checkout_pay_url"].(string)
+	if paymentURL == "" {
+		http.NotFound(w, r)
+		return
+	}
+	escapedURL, _ := json.Marshal(paymentURL)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = fmt.Fprintf(w, "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><script>location.replace(%s)</script></body></html>", escapedURL)
+}
+
 func (s *Service) legacyCreate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		writeError(w, 400, 40002, "invalid form", requestID(r))
@@ -2531,8 +2558,8 @@ func validateProviderConfig(provider string, config providerConfig) error {
 		if config.Alipay == nil || config.Alipay.PID == "" || config.Alipay.AppID == "" || config.Alipay.AppPrivateKeyPEM == "" || config.Alipay.AlipayPublicKeyPEM == "" {
 			return errors.New("支付宝配置需要 pid、app_id、app_private_key_pem、alipay_public_key_pem")
 		}
-		if mode := alipayPaymentMode(config.Alipay); mode != "face_to_face" && mode != "website" {
-			return errors.New("支付宝支付方式必须为 face_to_face 或 website")
+		if mode := alipayPaymentMode(config.Alipay); mode != "face_to_face" && mode != "website" && mode != "bill_query" {
+			return errors.New("支付宝支付方式必须为 face_to_face、website 或 bill_query")
 		}
 		return nil
 	}

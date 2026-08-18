@@ -121,6 +121,7 @@ func (s *Service) Routes() http.Handler {
 	mux.HandleFunc("GET /api.php", s.legacyAPI)
 	mux.HandleFunc("POST /api.php", s.legacyAPI)
 	mux.HandleFunc("GET /api/v1/payments/{orderNo}", s.publicCheckout)
+	mux.HandleFunc("GET /api/v1/payments/{orderNo}/alipay", s.alipayBillQueryLanding)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/auth/register", s.register)
 	mux.HandleFunc("GET /api/v1/auth/oidc/login", s.oidcLogin)
