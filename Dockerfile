@@ -16,7 +16,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
 COPY --from=frontend /src/web/dist ./web/dist
-RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/tsumugi-pay ./cmd/server
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/tsumugi-pay ./cmd/server
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \

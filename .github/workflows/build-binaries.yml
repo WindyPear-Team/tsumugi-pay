@@ -48,32 +48,34 @@ jobs:
       matrix:
         include:
           - name: macos-x64
-            runner: macos-13
+            goos: darwin
             arch: amd64
             ext: ""
           - name: macos-arm64
-            runner: macos-14
+            goos: darwin
             arch: arm64
             ext: ""
           - name: linux-x64
-            runner: ubuntu-24.04
+            goos: linux
             arch: amd64
             ext: ""
           - name: linux-arm64
-            runner: ubuntu-24.04-arm
+            goos: linux
             arch: arm64
             ext: ""
           - name: windows-x64
-            runner: windows-2025
+            goos: windows
             arch: amd64
             ext: .exe
           - name: windows-arm64
-            runner: windows-11-arm
+            goos: windows
             arch: arm64
             ext: .exe
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     env:
-      CGO_ENABLED: 1
+      CGO_ENABLED: 0
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.arch }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -90,9 +92,11 @@ jobs:
           name: web-dist
           path: web/dist
 
-      - name: Verify runner architecture
+      - name: Verify target architecture
         shell: bash
-        run: test "$(go env GOARCH)" = "${{ matrix.arch }}"
+        run: |
+          test "$(go env GOOS)" = "${{ matrix.goos }}"
+          test "$(go env GOARCH)" = "${{ matrix.arch }}"
 
       - name: Build backend
         shell: bash
