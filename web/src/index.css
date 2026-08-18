@@ -683,10 +683,13 @@ button {
   overflow: hidden;
 }
 .table-wrap {
+  max-width: 100%;
   overflow-x: auto;
+  overscroll-behavior-inline: contain;
 }
 table {
   width: 100%;
+  min-width: 760px;
   border-collapse: collapse;
 }
 th {
@@ -694,6 +697,7 @@ th {
   color: #7c928b;
   background: #f9fbf8;
   text-align: left;
+  white-space: nowrap;
   font:
     10px "DM Mono",
     monospace;
@@ -706,6 +710,7 @@ td {
   font-size: 11px;
   color: #49635b;
   vertical-align: middle;
+  white-space: nowrap;
 }
 td b,
 td small {
@@ -718,6 +723,7 @@ td b {
 .table-panel td small {
   color: #91a39d;
   margin-top: 3px;
+  white-space: nowrap;
   font:
     9px "DM Mono",
     monospace;
@@ -1636,16 +1642,28 @@ td b {
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  background: #111b18;
+  --dark-background: color-mix(in srgb, var(--theme-color, #2f9c84) 10%, #111b18);
+  --dark-sidebar: color-mix(in srgb, var(--theme-color, #2f9c84) 24%, #10231e);
+  background: var(--dark-background);
 }
 :root[data-theme="dark"] body,
 :root[data-theme="dark"] .main {
-  background: #111b18;
+  background: var(--dark-background);
   color: #dce9e3;
+}
+:root[data-theme="dark"] .sidebar,
+:root[data-theme="dark"] [data-slot="sidebar-container"],
+:root[data-theme="dark"] [data-slot="sidebar-inner"],
+:root[data-theme="dark"] [data-mobile="true"] [data-sidebar="sidebar"] {
+  background: var(--dark-sidebar);
+}
+:root[data-theme="dark"] [data-slot="sidebar-container"] {
+  border-right-color: transparent !important;
+  border-left-color: transparent !important;
 }
 :root[data-theme="dark"] .topbar {
   border-color: #263a34;
-  background: #15221e;
+  background: color-mix(in srgb, var(--theme-color, #2f9c84) 14%, #15221e);
 }
 :root[data-theme="dark"] .topbar h1,
 :root[data-theme="dark"] h2,
@@ -1660,10 +1678,33 @@ td b {
 :root[data-theme="dark"] [data-slot="select-content"],
 :root[data-theme="dark"] [data-slot="select-trigger"],
 :root[data-theme="dark"] .secondary-button,
-:root[data-theme="dark"] .table-tools {
+:root[data-theme="dark"] .icon-button,
+:root[data-theme="dark"] .account-select,
+:root[data-theme="dark"] .segmented button.selected,
+:root[data-theme="dark"] .mobile-sidebar-trigger,
+:root[data-theme="dark"] .table-tools,
+:root[data-theme="dark"] .table-pages,
+:root[data-theme="dark"] .discovery-button,
+:root[data-theme="dark"] .modal header button {
   border-color: #2a4039;
   background: #192923;
   color: #cfe1d9;
+}
+:root[data-theme="dark"] .segmented,
+:root[data-theme="dark"] .settings-tabs {
+  background: #15231e;
+  border-color: #2a4039;
+}
+:root[data-theme="dark"] .segmented button,
+:root[data-theme="dark"] .settings-tabs button,
+:root[data-theme="dark"] .row-actions button,
+:root[data-theme="dark"] .text-button {
+  color: #a9c8bc;
+}
+:root[data-theme="dark"] .segmented button.selected,
+:root[data-theme="dark"] .settings-tabs button.selected {
+  color: #e7f1ed;
+  box-shadow: 0 1px 3px #0e1714;
 }
 :root[data-theme="dark"] th {
   background: #15231e;
@@ -1677,11 +1718,17 @@ td b {
 }
 :root[data-theme="dark"] input,
 :root[data-theme="dark"] textarea,
+:root[data-theme="dark"] select,
 :root[data-theme="dark"] .settings-tabs,
 :root[data-theme="dark"] .discovery-result {
   color: #e1ece7;
   border-color: #314941;
   background: #15241f;
+}
+:root[data-theme="dark"] [data-slot="select-item"]:focus,
+:root[data-theme="dark"] [data-slot="select-item"][data-highlighted] {
+  background: color-mix(in srgb, var(--theme-color, #2f9c84) 24%, #192923);
+  color: #e7f1ed;
 }
 :root[data-theme="dark"] .account-banner {
   border-color: #2a4039;
