@@ -11,7 +11,6 @@ export function BillsPage({ data, canManage, request, onRefresh }: { data: Bill[
   const [query, setQuery] = useState("")
   const [page, setPage] = useState(1)
   const [selected, setSelected] = useState<Bill | null>(null)
-  const [refund, setRefund] = useState<Bill | null>(null)
   const [reconcile, setReconcile] = useState<Bill | null>(null)
   const filtered = (filter === "all" ? data : data.filter((bill) => bill.status === filter)).filter((bill) => `${bill.subject} ${bill.merchant_order_no} ${bill.platform_order_no}`.toLowerCase().includes(query.toLowerCase()))
   const pageCount = Math.max(1, Math.ceil(filtered.length / 10))
@@ -104,12 +103,7 @@ export function BillsPage({ data, canManage, request, onRefresh }: { data: Bill[
                         <button onClick={() => close(bill)}>关闭</button>
                       </>
                     )}
-                    {canManage && bill.status === "paid" && (
-                      <>
-                        <button onClick={() => retryCallback(bill)}>重发回调</button>
-                        <button onClick={() => setRefund(bill)}>退款</button>
-                      </>
-                    )}
+                    {canManage && bill.status === "paid" && <button onClick={() => retryCallback(bill)}>重发回调</button>}
                   </td>
                 </tr>
               ))}
@@ -149,17 +143,6 @@ export function BillsPage({ data, canManage, request, onRefresh }: { data: Bill[
             onRefresh()
           }}
         />
-      )}{" "}
-      {refund && (
-        <RefundModal
-          bill={refund}
-          request={request}
-          onClose={() => setRefund(null)}
-          onSaved={() => {
-            setRefund(null)
-            onRefresh()
-          }}
-        />
       )}
     </div>
   )
@@ -194,48 +177,6 @@ function ReconcileModal({ bill, request, onClose, onSaved }: { bill: Bill; reque
       {error && <p className="form-error">{error}</p>}
       <button className="primary-button full" disabled={!providerTransactionID.trim()} onClick={save}>
         确认补单
-      </button>
-    </Modal>
-  )
-}
-
-function RefundModal({ bill, request, onClose, onSaved }: { bill: Bill; request: ApiRequest; onClose: () => void; onSaved: () => void }) {
-  const [amount, setAmount] = useState(bill.amount)
-  const [refundOrderNo, setRefundOrderNo] = useState(`RF${Date.now()}`)
-  const [reason, setReason] = useState("后台发起退款")
-  const [error, setError] = useState("")
-  async function save() {
-    try {
-      await request(`/api/v1/admin/bills/${bill.id}/refunds`, {
-        method: "POST",
-        body: JSON.stringify({
-          refund_order_no: refundOrderNo,
-          amount,
-          reason,
-        }),
-      })
-      onSaved()
-    } catch (err: any) {
-      setError(err.message)
-    }
-  }
-  return (
-    <Modal title="发起退款" onClose={onClose}>
-      <Label className="form-label">
-        退款金额
-        <Input value={amount} onChange={(event) => setAmount(event.target.value)} />
-      </Label>
-      <Label className="form-label">
-        退款单号
-        <Input value={refundOrderNo} onChange={(event) => setRefundOrderNo(event.target.value)} />
-      </Label>
-      <Label className="form-label">
-        退款原因
-        <Input value={reason} onChange={(event) => setReason(event.target.value)} />
-      </Label>
-      {error && <p className="form-error">{error}</p>}
-      <button className="primary-button full" onClick={save}>
-        确认退款
       </button>
     </Modal>
   )

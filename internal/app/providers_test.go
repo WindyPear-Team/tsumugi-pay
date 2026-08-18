@@ -203,7 +203,7 @@ func TestAlipayBillQueryCreatesPaymentURLAndReconcilesVerifiedLog(t *testing.T) 
 		t.Fatalf("marshal public key: %v", err)
 	}
 	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
-	responseJSON := `{"code":"10000","detail_list":[{"account_log_id":"LOG-001","alipay_order_no":"TRADE-001","merchant_order_no":"ORDER-003","trans_amount":"1.00","direction":"IN"}]}`
+	responseJSON := `{"code":"10000","detail_list":[{"account_log_id":"LOG-001","alipay_order_no":"TRADE-001","memo":"ORDER-003","trans_amount":"1.00","direction":"IN"}]}`
 	responseSign, err := rsaSign(string(privatePEM), responseJSON)
 	if err != nil {
 		t.Fatalf("sign account-log response: %v", err)
@@ -219,8 +219,8 @@ func TestAlipayBillQueryCreatesPaymentURLAndReconcilesVerifiedLog(t *testing.T) 
 		if err := json.Unmarshal([]byte(r.PostForm.Get("biz_content")), &business); err != nil {
 			t.Fatalf("decode account-log query: %v", err)
 		}
-		if business["merchant_order_no"] != "ORDER-003" {
-			t.Fatalf("merchant order = %q", business["merchant_order_no"])
+		if business["start_time"] == "" || business["end_time"] == "" || business["merchant_order_no"] != "" {
+			t.Fatalf("unexpected account-log query: %+v", business)
 		}
 		_, _ = fmt.Fprintf(w, `{"alipay_data_bill_accountlog_query_response":%s,"sign":%q}`, responseJSON, responseSign)
 	}))

@@ -13,6 +13,7 @@ type Checkout = {
   status: string
   qrcode?: string
   pay_url?: string
+	  auto_redirect?: boolean
   return_url?: string
   expires_at?: string
 }
@@ -32,8 +33,8 @@ export function CheckoutPage({ orderNo, siteName }: { orderNo: string; siteName:
         if (!response.ok) throw new Error(body.message || "无法获取支付订单")
         if (cancelled) return
         setCheckout(body)
-        const paymentTarget = body.pay_url || (autoRedirect ? body.qrcode : "")
-        if (body.status === "pending" && autoRedirect && paymentTarget && !redirecting) {
+        const paymentTarget = body.pay_url || body.qrcode
+        if (body.status === "pending" && autoRedirect && body.auto_redirect !== false && paymentTarget && !redirecting) {
           redirecting = true
           window.location.replace(paymentTarget)
         }
@@ -71,7 +72,7 @@ export function CheckoutPage({ orderNo, siteName }: { orderNo: string; siteName:
             {checkout.status === "pending" && checkout.qrcode && (
               <div className="checkout-qr">
                 <QRCodeSVG value={checkout.qrcode} size={220} level="M" includeMargin />
-                <p>{autoRedirect ? "正在打开支付地址..." : "请使用微信扫描二维码完成支付"}</p>
+                <p>{autoRedirect && checkout.auto_redirect !== false ? "正在打开支付地址..." : `请使用${providerName[checkout.provider] || checkout.provider}扫描二维码完成支付`}</p>
               </div>
             )}
             {checkout.status === "pending" && !checkout.qrcode && !checkout.pay_url && <div className="checkout-message">支付方式暂未返回可用收银台。</div>}

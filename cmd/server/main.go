@@ -71,6 +71,7 @@ func main() {
 		logger.Error("bootstrap failed", "error", err)
 		os.Exit(1)
 	}
+	service.StartBillPolling(ctx)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", web.Handler(service.Routes()))

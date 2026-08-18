@@ -309,7 +309,19 @@ func (s *Service) alipayAccountLogQuery(ctx context.Context, cfg *alipayConfig, 
 	if cfg.AlipayPublicKeyPEM == "" {
 		return providerPaymentStatus{}, errors.New("支付宝账单查询需要配置支付宝公钥")
 	}
-	biz, err := json.Marshal(map[string]string{"merchant_order_no": bill.MerchantOrderNo, "page_no": "1", "page_size": "20"})
+	now := time.Now()
+	start := bill.CreatedAt
+	if start.IsZero() || start.After(now) {
+		start = now.Add(-15 * time.Minute)
+	} else {
+		start = start.Add(-2 * time.Minute)
+	}
+	biz, err := json.Marshal(map[string]string{
+		"start_time": start.Format("2006-01-02 15:04:05"),
+		"end_time":   now.Format("2006-01-02 15:04:05"),
+		"page_no":    "1",
+		"page_size":  "100",
+	})
 	if err != nil {
 		return providerPaymentStatus{}, err
 	}
@@ -371,8 +383,7 @@ func (s *Service) alipayAccountLogQuery(ctx context.Context, cfg *alipayConfig, 
 		return providerPaymentStatus{}, fmt.Errorf("支付宝账单查询接口错误: %s", response.SubMsg)
 	}
 	for _, detail := range response.DetailList {
-		merchantOrderNo := jsonString(detail, "merchant_order_no")
-		if merchantOrderNo != bill.MerchantOrderNo || !alipayIncoming(detail) || !alipayAmountMatches(detail, bill.AmountMinor) {
+		if !alipayOrderReferenceMatches(detail, bill.MerchantOrderNo) || !alipayIncoming(detail) || !alipayAmountMatches(detail, bill.AmountMinor) {
 			continue
 		}
 		tradeID := jsonString(detail, "alipay_order_no")
@@ -385,6 +396,15 @@ func (s *Service) alipayAccountLogQuery(ctx context.Context, cfg *alipayConfig, 
 		return providerPaymentStatus{Paid: true, TransactionID: tradeID, Raw: map[string]any{"verified": true, "method": "alipay.data.bill.accountlog.query", "detail": detail}}, nil
 	}
 	return providerPaymentStatus{Raw: map[string]any{"verified": true, "method": "alipay.data.bill.accountlog.query", "detail_count": len(response.DetailList)}}, nil
+}
+
+func alipayOrderReferenceMatches(detail map[string]any, orderNo string) bool {
+	for _, key := range []string{"merchant_order_no", "memo", "trans_memo", "remark"} {
+		if strings.TrimSpace(jsonString(detail, key)) == orderNo {
+			return true
+		}
+	}
+	return false
 }
 
 func alipayIncoming(detail map[string]any) bool {
@@ -817,4 +837,15 @@ func wechatDecrypt(apiKey, nonce, associated, cipherText string) ([]byte, error)
 	}
 	return gcm.Open(nil, []byte(nonce), payload, []byte(associated))
 }
-func jsonString(data map[string]any, key string) string { value, _ := data[key].(string); return value }
+func jsonString(data map[string]any, key string) string {
+	switch value := data[key].(type) {
+	case string:
+		return value
+	case json.Number:
+		return value.String()
+	case float64:
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	default:
+		return ""
+	}
+}

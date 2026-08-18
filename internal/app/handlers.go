@@ -165,10 +165,11 @@ func (s *Service) publicCheckout(w http.ResponseWriter, r *http.Request) {
 	if payURL == "" {
 		payURL, _ = payload["h5_url"].(string)
 	}
+	autoRedirect := payload["method"] != "alipay.data.bill.accountlog.query"
 	writeJSON(w, http.StatusOK, map[string]any{
 		"platform_order_no": bill.PlatformOrderNo, "merchant_order_no": bill.MerchantOrderNo, "subject": bill.Subject,
 		"amount": moneyString(bill.AmountMinor), "currency": bill.Currency, "provider": bill.Provider, "status": bill.Status,
-		"qrcode": qrcode, "pay_url": payURL, "return_url": stringValue(bill.ReturnURL), "expires_at": bill.ExpiresAt, "paid_at": bill.PaidAt,
+		"qrcode": qrcode, "pay_url": payURL, "auto_redirect": autoRedirect, "return_url": stringValue(bill.ReturnURL), "expires_at": bill.ExpiresAt, "paid_at": bill.PaidAt,
 	})
 }
 
