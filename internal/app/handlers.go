@@ -301,6 +301,11 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 		scene = "page"
 		// return paymentResponse{}, clientError{40003, "unsupported payment scene"}
 	}
+	if input.PaymentMethod == "wxpay" || input.PaymentMethod == "wechat" {
+		if scene == "page" {
+			scene = "wap"
+		}
+	}
 	expires := nowUTC().Add(15 * time.Minute)
 	bill := billRecord{ID: uuid.New(), AccountID: account.ID, ChannelID: channelModel.ID, PlatformOrderNo: "TP" + strings.ToUpper(strings.ReplaceAll(uuid.NewString(), "-", ""))[:24], MerchantOrderNo: input.MerchantOrderNo, Subject: input.Subject, Description: input.Description, AmountMinor: amount, Currency: "CNY", Provider: input.PaymentMethod, Scene: scene, Status: "pending", NotifyURL: input.NotifyURL, ReturnURL: input.ReturnURL, Metadata: input.Metadata, ExpiresAt: &expires, CreatedAt: nowUTC(), UpdatedAt: nowUTC()}
 	err = s.db.DB().WithContext(ctx).Create(bill.toModel()).Error
