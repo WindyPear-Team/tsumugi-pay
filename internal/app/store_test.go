@@ -99,6 +99,13 @@ func TestMerchantCallbackUsesAPISecret(t *testing.T) {
 	if err := store.DB().Create(&Account{ID: accountID, Name: "Callback Test", MerchantNo: "1000", APISecretCiphertext: apiSecret, CallbackSecretCiphertext: callbackSecret}).Error; err != nil {
 		t.Fatalf("create account: %v", err)
 	}
+	siteConfigJSON, err := json.Marshal(siteConfig{CallbackSSRF: callbackSSRFConfig{Enabled: false}})
+	if err != nil {
+		t.Fatalf("encode site config: %v", err)
+	}
+	if err := store.DB().Create(&SystemSetting{SettingKey: "site_config", SettingValue: string(siteConfigJSON)}).Error; err != nil {
+		t.Fatalf("save site config: %v", err)
+	}
 	bill := billRecord{ID: uuid.New(), AccountID: accountID, MerchantOrderNo: "ORDER-CALLBACK-1", Subject: "Callback test", AmountMinor: 100, Provider: "alipay", ProviderTransactionID: "TRADE-1", NotifyURL: callback.URL}
 	service.notifyMerchant(context.Background(), bill)
 	if received == nil {

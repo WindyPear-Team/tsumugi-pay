@@ -537,6 +537,7 @@ export function SettingsPage({ user, account, settings, request, onSaved }: { us
     privacy_policy_url: "",
     oidc_enabled: false,
     oidc_login_label: "",
+    callback_ssrf: { enabled: true, blocked_cidrs: [] },
   })
   const [error, setError] = useState("")
   const [discovering, setDiscovering] = useState(false)
@@ -635,6 +636,32 @@ export function SettingsPage({ user, account, settings, request, onSaved }: { us
             <Toggle label="允许账号密码注册" description="仅关闭账号密码注册；不会影响 OIDC 首次登录开户。" checked={site.allow_password_registration} onCheckedChange={(allow_password_registration) => setSite({ ...site, allow_password_registration })} />
             <Field label="用户协议链接" value={site.terms_url} set={(terms_url) => setSite({ ...site, terms_url })} />
             <Field label="隐私政策链接" value={site.privacy_policy_url} set={(privacy_policy_url) => setSite({ ...site, privacy_policy_url })} />
+            <Toggle
+              label="启用商户回调 SSRF 防护"
+              description="默认开启；阻断内网、环回、链路本地和自定义 CIDR，并在每次重定向与连接时复核目标地址。"
+              checked={site.callback_ssrf.enabled}
+              onCheckedChange={(enabled) => setSite({ ...site, callback_ssrf: { ...site.callback_ssrf, enabled } })}
+            />
+            <Label className="form-label">
+              额外阻断的 CIDR 范围
+              <Textarea
+                rows={4}
+                value={site.callback_ssrf.blocked_cidrs.join("\n")}
+                placeholder={"100.64.0.0/10\n198.18.0.0/15"}
+                onChange={(event) =>
+                  setSite({
+                    ...site,
+                    callback_ssrf: {
+                      ...site.callback_ssrf,
+                      blocked_cidrs: event.target.value
+                        .split("\n")
+                        .map((item) => item.trim())
+                        .filter(Boolean),
+                    },
+                  })
+                }
+              />
+            </Label>
             <Label className="form-label">
               邮箱后缀白名单
               <Textarea

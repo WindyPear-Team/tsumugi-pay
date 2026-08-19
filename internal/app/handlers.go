@@ -79,14 +79,15 @@ type accountSiteSettings struct {
 	OIDC     oidcSiteConfig
 }
 type siteConfig struct {
-	SiteName                  string   `json:"site_name"`
-	AllowPasswordLogin        bool     `json:"allow_password_login"`
-	AllowPasswordRegistration bool     `json:"allow_password_registration"`
-	EmailWhitelist            []string `json:"email_whitelist"`
-	TermsURL                  string   `json:"terms_url"`
-	PrivacyPolicyURL          string   `json:"privacy_policy_url"`
-	FaviconURL                string   `json:"favicon_url"`
-	ThemeColor                string   `json:"theme_color"`
+	SiteName                  string             `json:"site_name"`
+	AllowPasswordLogin        bool               `json:"allow_password_login"`
+	AllowPasswordRegistration bool               `json:"allow_password_registration"`
+	EmailWhitelist            []string           `json:"email_whitelist"`
+	TermsURL                  string             `json:"terms_url"`
+	PrivacyPolicyURL          string             `json:"privacy_policy_url"`
+	FaviconURL                string             `json:"favicon_url"`
+	ThemeColor                string             `json:"theme_color"`
+	CallbackSSRF              callbackSSRFConfig `json:"callback_ssrf"`
 }
 type paymentInput struct {
 	MerchantID      string `json:"merchant_id"`
@@ -247,10 +248,10 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 	if err != nil || amount < 1 {
 		return paymentResponse{}, clientError{40004, "invalid amount"}
 	}
-	if !s.validCallbackURL(input.NotifyURL) {
+	if !s.validCallbackURL(ctx, input.NotifyURL) {
 		return paymentResponse{}, clientError{40002, "invalid notify_url"}
 	}
-	if input.ReturnURL != "" && !s.validCallbackURL(input.ReturnURL) {
+	if input.ReturnURL != "" && !s.validExternalURL(input.ReturnURL) {
 		return paymentResponse{}, clientError{40002, "invalid return_url"}
 	}
 	account, err := s.accountByMerchantNo(ctx, input.MerchantID)
@@ -539,7 +540,7 @@ func (s *Service) getPublicSiteConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, 50001, "cannot load OIDC configuration", requestID(r))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"site_name": config.SiteName, "allow_password_login": config.AllowPasswordLogin, "allow_password_registration": config.AllowPasswordRegistration, "email_whitelist": config.EmailWhitelist, "terms_url": config.TermsURL, "privacy_policy_url": config.PrivacyPolicyURL, "favicon_url": config.FaviconURL, "theme_color": config.ThemeColor, "oidc_enabled": oidcConfig.Enabled, "oidc_login_label": oidcConfig.LoginLabel})
+	writeJSON(w, http.StatusOK, map[string]any{		"site_name": config.SiteName, "allow_password_login": config.AllowPasswordLogin, "allow_password_registration": config.AllowPasswordRegistration, "email_whitelist": config.EmailWhitelist, "terms_url": config.TermsURL, "privacy_policy_url": config.PrivacyPolicyURL, "favicon_url": config.FaviconURL, "theme_color": config.ThemeColor, "oidc_enabled": oidcConfig.Enabled, "oidc_login_label": oidcConfig.LoginLabel})
 }
 
 func (s *Service) loadPlatformOIDC(ctx context.Context) (oidcSiteConfig, error) {
@@ -1141,7 +1142,7 @@ func (s *Service) loadAccountSettings(ctx context.Context, accountID uuid.UUID) 
 	return settings, true, nil
 }
 func defaultSiteConfig() siteConfig {
-	return siteConfig{SiteName: "Tsumugi Pay", ThemeColor: "#2f9c84", AllowPasswordLogin: true, AllowPasswordRegistration: false, EmailWhitelist: []string{}}
+	return siteConfig{SiteName: "Tsumugi Pay", ThemeColor: "#2f9c84", AllowPasswordLogin: true, AllowPasswordRegistration: false, EmailWhitelist: []string{}, CallbackSSRF: defaultCallbackSSRFConfig()}
 }
 func (s *Service) loadSiteConfig(ctx context.Context) (siteConfig, error) {
 	config := defaultSiteConfig()
@@ -1187,6 +1188,11 @@ func (s *Service) saveSiteConfig(ctx context.Context, config siteConfig) error {
 		return err
 	}
 	config.EmailWhitelist = whitelist
+	callbackSSRF, err := normalizeCallbackSSRFConfig(config.CallbackSSRF)
+	if err != nil {
+		return err
+	}
+	config.CallbackSSRF = callbackSSRF
 	encoded, err := json.Marshal(config)
 	if err != nil {
 		return err
@@ -2354,7 +2360,25 @@ func (s *Service) notifyMerchant(ctx context.Context, bill billRecord) {
 	values := url.Values{"pid": {s.merchantNo(ctx, bill.AccountID)}, "type": {providerOPSCode(bill.Provider)}, "out_trade_no": {bill.MerchantOrderNo}, "trade_no": {bill.ProviderTransactionID}, "name": {bill.Subject}, "money": {moneyString(bill.AmountMinor)}, "trade_status": {"TRADE_SUCCESS"}, "param": {bill.Metadata}, "sign_type": {"MD5"}}
 	signature, _ := signOPS(canonicalSignatureValues(values), secret, "MD5")
 	values.Set("sign", signature)
+	site, err := s.loadSiteConfig(ctx)
+	if err != nil {
+		s.logger.Error("merchant callback cannot load site configuration", "bill_id", bill.ID, "error", err)
+		return
+	}
 	client := s.httpClient
+	if site.CallbackSSRF.Enabled {
+		policy, policyErr := newCallbackSSRFPolicy(site.CallbackSSRF)
+		if policyErr != nil {
+			s.logger.Error("merchant callback SSRF policy is invalid", "bill_id", bill.ID, "error", policyErr)
+			return
+		}
+		if policyErr = policy.validateURL(ctx, bill.NotifyURL); policyErr != nil {
+			s.logger.Warn("merchant callback blocked by SSRF policy", "bill_id", bill.ID, "error", policyErr)
+			s.audit(ctx, &bill.AccountID, nil, "merchant.callback.blocked", "bill", bill.ID.String(), "", map[string]string{"error": policyErr.Error()})
+			return
+		}
+		client = policy.client()
+	}
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
@@ -2461,8 +2485,16 @@ func isUniqueViolation(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "unique") || strings.Contains(message, "duplicate")
 }
-func (s *Service) validCallbackURL(raw string) bool {
-	return s.validExternalURL(raw)
+func (s *Service) validCallbackURL(ctx context.Context, raw string) bool {
+	site, err := s.loadSiteConfig(ctx)
+	if err != nil {
+		return false
+	}
+	if !site.CallbackSSRF.Enabled {
+		return s.validExternalURL(raw)
+	}
+	policy, err := newCallbackSSRFPolicy(site.CallbackSSRF)
+	return err == nil && policy.validateURL(ctx, raw) == nil
 }
 func (s *Service) validExternalURL(raw string) bool {
 	parsed, err := url.Parse(raw)

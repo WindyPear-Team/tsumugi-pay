@@ -100,8 +100,12 @@ export type PublicSiteConfig = {
   oidc_enabled: boolean
   oidc_login_label: string
 }
+export type CallbackSSRFSettings = {
+  enabled: boolean
+  blocked_cidrs: string[]
+}
 export type SiteSettings = {
-  site: PublicSiteConfig
+  site: PublicSiteConfig & { callback_ssrf: CallbackSSRFSettings }
   email: {
     host: string
     port: number
