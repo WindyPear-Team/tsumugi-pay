@@ -25,7 +25,8 @@ export function CheckoutPage({ orderNo, siteName }: { orderNo: string; siteName:
 
   useEffect(() => {
     let cancelled = false
-    let redirecting = false
+    let paymentRedirected = false
+    let completionRedirected = false
     let loading = false
     async function load() {
       if (cancelled || loading) return
@@ -38,12 +39,12 @@ export function CheckoutPage({ orderNo, siteName }: { orderNo: string; siteName:
         setError("")
         setCheckout(body)
         const paymentTarget = body.pay_url || body.qrcode
-        if (body.status === "pending" && autoRedirect && body.auto_redirect !== false && paymentTarget && !redirecting) {
-          redirecting = true
+        if (body.status === "pending" && autoRedirect && body.auto_redirect !== false && paymentTarget && !paymentRedirected) {
+          paymentRedirected = true
           window.location.replace(paymentTarget)
         }
-        if (body.status === "paid" && body.return_url && !redirecting) {
-          redirecting = true
+        if (body.status === "paid" && body.return_url && !completionRedirected) {
+          completionRedirected = true
           window.location.replace(body.return_url)
         }
       } catch (err: any) {
