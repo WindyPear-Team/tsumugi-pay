@@ -59,7 +59,8 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [theme, setTheme] = useState<"light" | "dark">(() => (localStorage.getItem("tsumugi_theme") === "dark" ? "dark" : "light"))
   const view = viewFor(location.pathname)
-  const pageTitle = !token ? (location.pathname === "/setup" ? "初始化" : "登录") : titles[view]
+  const isCheckout = location.pathname.startsWith("/checkout/")
+  const pageTitle = isCheckout ? "支付" : !token ? (location.pathname === "/setup" ? "初始化" : "登录") : titles[view]
   const activeAccount = account || undefined
   const canManagePayments = user?.role === "user"
   const isPlatformAdmin = user?.role === "platform_admin"
@@ -155,7 +156,7 @@ export default function App() {
   useEffect(() => {
     loadPage()
   }, [view, token])
-  if (location.pathname.startsWith("/checkout/")) {
+  if (isCheckout) {
     return <CheckoutPage orderNo={decodeURIComponent(location.pathname.slice("/checkout/".length))} siteName={siteConfig?.site_name || "Tsumugi Pay"} />
   }
   if (!token && setupRequired === null)
