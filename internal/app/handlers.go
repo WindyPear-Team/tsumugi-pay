@@ -298,7 +298,7 @@ func (s *Service) createBill(ctx context.Context, input paymentInput) (paymentRe
 		scene = "native"
 	}
 	if scene != "page" && scene != "wap" && scene != "native" && scene != "jsapi" {
-		scene = "page"
+		scene = "native"
 		// return paymentResponse{}, clientError{40003, "unsupported payment scene"}
 	}
 	if input.PaymentMethod == "wxpay" || input.PaymentMethod == "wechat" {
