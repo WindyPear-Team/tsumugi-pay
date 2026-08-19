@@ -115,7 +115,7 @@ func loadConfig() (config, error) {
 		JWTSecret:      env("JWT_SECRET", "change-this-development-jwt-secret"),
 		PublicBaseURL:  strings.TrimRight(env("PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
 		Environment:    env("APP_ENV", "development"),
-		BootstrapDemo:  env("BOOTSTRAP_DEMO", "true") == "true",
+		BootstrapDemo:  env("BOOTSTRAP_DEMO", "false") == "true",
 	}
 	encodedKey := os.Getenv("APP_ENCRYPTION_KEY")
 	if encodedKey == "" {
@@ -133,6 +133,9 @@ func loadConfig() (config, error) {
 	}
 	if cfg.Environment == "production" && cfg.JWTSecret == "change-this-development-jwt-secret" {
 		return cfg, errors.New("JWT_SECRET must be changed in production")
+	}
+	if cfg.Environment == "production" && cfg.BootstrapDemo {
+		return cfg, errors.New("BOOTSTRAP_DEMO must be false in production")
 	}
 	return cfg, nil
 }
