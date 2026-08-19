@@ -26,12 +26,16 @@ export function CheckoutPage({ orderNo, siteName }: { orderNo: string; siteName:
   useEffect(() => {
     let cancelled = false
     let redirecting = false
+    let loading = false
     async function load() {
+      if (cancelled || loading) return
+      loading = true
       try {
-        const response = await fetch(`${API}/api/v1/payments/${encodeURIComponent(orderNo)}`)
+        const response = await fetch(`${API}/api/v1/payments/${encodeURIComponent(orderNo)}`, { cache: "no-store" })
         const body = await response.json().catch(() => ({}))
         if (!response.ok) throw new Error(body.message || "无法获取支付订单")
         if (cancelled) return
+        setError("")
         setCheckout(body)
         const paymentTarget = body.pay_url || body.qrcode
         if (body.status === "pending" && autoRedirect && body.auto_redirect !== false && paymentTarget && !redirecting) {
@@ -44,13 +48,24 @@ export function CheckoutPage({ orderNo, siteName }: { orderNo: string; siteName:
         }
       } catch (err: any) {
         if (!cancelled) setError(err.message)
+      } finally {
+        loading = false
       }
     }
+    const refreshWhenVisible = () => {
+      if (!document.hidden) void load()
+    }
     void load()
-    const timer = window.setInterval(load, 2500)
+    const timer = window.setInterval(() => void load(), 2500)
+    window.addEventListener("focus", refreshWhenVisible)
+    window.addEventListener("pageshow", refreshWhenVisible)
+    document.addEventListener("visibilitychange", refreshWhenVisible)
     return () => {
       cancelled = true
       window.clearInterval(timer)
+      window.removeEventListener("focus", refreshWhenVisible)
+      window.removeEventListener("pageshow", refreshWhenVisible)
+      document.removeEventListener("visibilitychange", refreshWhenVisible)
     }
   }, [autoRedirect, orderNo])
 

@@ -140,6 +140,8 @@ func (s *Service) publicCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) publicCheckout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, max-age=0, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
 	orderNo := strings.TrimSpace(r.PathValue("orderNo"))
 	if orderNo == "" || len(orderNo) > 64 {
 		writeError(w, http.StatusBadRequest, 40002, "invalid payment order", requestID(r))
