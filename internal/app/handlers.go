@@ -2289,12 +2289,15 @@ func (s *Service) applyWebhook(ctx context.Context, channel channelRecord, resul
 			return nil
 		}
 		var model Bill
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("account_id = ? AND merchant_order_no = ?", channel.AccountID, result.MerchantOrderNo).Take(&model).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("account_id = ? AND channel_id = ? AND provider = ? AND merchant_order_no = ?", channel.AccountID, channel.ID, channel.Provider, result.MerchantOrderNo).Take(&model).Error; err != nil {
 			return err
 		}
 		bill = billRecordFromModel(model)
 		if bill.Status != "pending" {
 			return nil
+		}
+		if err := validateWebhookForBill(channel, bill, result); err != nil {
+			return err
 		}
 		paid := nowUTC()
 		if err := tx.Model(&Bill{}).Where("id = ?", bill.ID).Updates(map[string]any{"status": "paid", "provider_transaction_id": nullableString(result.ProviderTradeID), "provider_payload": string(raw), "paid_at": paid}).Error; err != nil {
@@ -2311,6 +2314,29 @@ func (s *Service) applyWebhook(ctx context.Context, channel channelRecord, resul
 	}
 	return nil
 }
+
+func validateWebhookForBill(channel channelRecord, bill billRecord, result webhookResult) error {
+	if bill.ChannelID != channel.ID || bill.Provider != channel.Provider || bill.MerchantOrderNo != result.MerchantOrderNo {
+		return errors.New("payment webhook does not match bill channel or provider")
+	}
+	if bill.AmountMinor != result.AmountMinor || bill.Currency != result.Currency {
+		return errors.New("payment webhook amount or currency does not match bill")
+	}
+	switch channel.Provider {
+	case "alipay":
+		if channel.Config.Alipay == nil || result.MerchantID != channel.Config.Alipay.PID || result.AppID != channel.Config.Alipay.AppID {
+			return errors.New("Alipay webhook merchant identity does not match channel")
+		}
+	case "wechat":
+		if channel.Config.Wechat == nil || result.MerchantID != channel.Config.Wechat.MchID || result.AppID != channel.Config.Wechat.AppID {
+			return errors.New("WeChat Pay webhook merchant identity does not match channel")
+		}
+	default:
+		return errors.New("unsupported payment provider")
+	}
+	return nil
+}
+
 func (s *Service) notifyMerchant(ctx context.Context, bill billRecord) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()

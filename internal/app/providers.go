@@ -78,6 +78,10 @@ type webhookResult struct {
 	EventKey        string
 	ProviderTradeID string
 	MerchantOrderNo string
+	MerchantID      string
+	AppID           string
+	AmountMinor     int64
+	Currency        string
 	Paid            bool
 	Raw             map[string]any
 }
@@ -509,7 +513,11 @@ func (s *Service) verifyAlipayWebhook(channel channelRecord, form url.Values) (w
 	for key, values := range form {
 		raw[key] = values[0]
 	}
-	return webhookResult{EventKey: "alipay:" + form.Get("notify_id") + ":" + form.Get("trade_no"), ProviderTradeID: form.Get("trade_no"), MerchantOrderNo: form.Get("out_trade_no"), Paid: form.Get("trade_status") == "TRADE_SUCCESS" || form.Get("trade_status") == "TRADE_FINISHED", Raw: raw}, nil
+	amount, err := parseAmount(form.Get("total_amount"))
+	if err != nil {
+		return webhookResult{}, errors.New("invalid Alipay webhook amount")
+	}
+	return webhookResult{EventKey: "alipay:" + form.Get("notify_id") + ":" + form.Get("trade_no"), ProviderTradeID: form.Get("trade_no"), MerchantOrderNo: form.Get("out_trade_no"), MerchantID: form.Get("seller_id"), AppID: form.Get("app_id"), AmountMinor: amount, Currency: "CNY", Paid: form.Get("trade_status") == "TRADE_SUCCESS" || form.Get("trade_status") == "TRADE_FINISHED", Raw: raw}, nil
 }
 
 func (s *Service) wechatCreate(ctx context.Context, channel channelRecord, bill billRecord) (providerResult, error) {
@@ -724,7 +732,40 @@ func (s *Service) verifyWechatWebhook(channel channelRecord, headers http.Header
 	orderNo, _ := raw["out_trade_no"].(string)
 	tradeID, _ := raw["transaction_id"].(string)
 	state, _ := raw["trade_state"].(string)
-	return webhookResult{EventKey: "wechat:" + envelope.ID, ProviderTradeID: tradeID, MerchantOrderNo: orderNo, Paid: state == "SUCCESS", Raw: raw}, nil
+	merchantID, _ := raw["mchid"].(string)
+	appID, _ := raw["appid"].(string)
+	amount, currency, err := wechatWebhookAmount(raw["amount"])
+	if err != nil {
+		return webhookResult{}, err
+	}
+	return webhookResult{EventKey: "wechat:" + envelope.ID, ProviderTradeID: tradeID, MerchantOrderNo: orderNo, MerchantID: merchantID, AppID: appID, AmountMinor: amount, Currency: currency, Paid: state == "SUCCESS", Raw: raw}, nil
+}
+
+func wechatWebhookAmount(value any) (int64, string, error) {
+	amount, ok := value.(map[string]any)
+	if !ok {
+		return 0, "", errors.New("invalid WeChat Pay webhook amount")
+	}
+	currency, _ := amount["currency"].(string)
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	if currency == "" {
+		return 0, "", errors.New("missing WeChat Pay webhook currency")
+	}
+	switch total := amount["total"].(type) {
+	case float64:
+		if total < 0 || total != float64(int64(total)) {
+			return 0, "", errors.New("invalid WeChat Pay webhook amount")
+		}
+		return int64(total), currency, nil
+	case json.Number:
+		parsed, err := total.Int64()
+		if err != nil || parsed < 0 {
+			return 0, "", errors.New("invalid WeChat Pay webhook amount")
+		}
+		return parsed, currency, nil
+	default:
+		return 0, "", errors.New("missing WeChat Pay webhook amount")
+	}
 }
 
 func canonicalValues(values url.Values) string {
