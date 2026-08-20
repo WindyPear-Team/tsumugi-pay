@@ -133,6 +133,11 @@ func (s *Service) refundPayment(ctx context.Context, channel channelRecord, bill
 func (s *Service) closePayment(ctx context.Context, channel channelRecord, bill billRecord) error {
 	switch channel.Provider {
 	case "alipay":
+		// 账单查询模式只生成支付宝转账二维码，不会在支付宝创建可供
+		// alipay.trade.close 关闭的交易；此时关闭仅收回本地待支付账单。
+		if alipayPaymentMode(channel.Config.Alipay) == "bill_query" {
+			return nil
+		}
 		return s.alipayClose(ctx, channel, bill)
 	case "wechat":
 		return s.wechatClose(ctx, channel, bill)
